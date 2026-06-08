@@ -269,6 +269,7 @@ class ArticleResult(BaseModel):
     name: str
     dimensions_mm: dict = {}
     chosen_options: dict = {}
+    price_eur: Optional[int] = None
 
 
 class GenerateResponse(BaseModel):
@@ -280,6 +281,14 @@ class GenerateResponse(BaseModel):
     image_base64: Optional[str] = None
     catalog_valid: bool = False
     gemini_prompt: str = ""
+
+
+class AdjustRequest(BaseModel):
+    project_id: str
+    original_prompt: str
+    adjustment: str
+    current_image_base64: Optional[str] = None
+    onboarding: list[dict] = []
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -298,20 +307,29 @@ async def gemini_text(prompt: str) -> dict:
         return json.loads(text)
 
 
-async def gemini_image(prompt: str) -> Optional[str]:
+async def gemini_image(prompt: str, reference_b64: Optional[str] = None) -> Optional[str]:
+    parts = []
+    if reference_b64:
+        parts.append({
+            "inlineData": {"mimeType": "image/jpeg", "data": reference_b64}
+        })
+        parts.append({"text": f"Use this kitchen as reference and apply the following changes. Keep the same camera angle, lighting, and layout.\n\n{prompt}"})
+    else:
+        parts.append({"text": prompt})
+
     async with httpx.AsyncClient(timeout=90) as client:
         r = await client.post(
             f"{GEMINI_IMAGE_URL}?key={GEMINI_KEY}",
             json={
-                "contents": [{"parts": [{"text": prompt}]}],
+                "contents": [{"parts": parts}],
                 "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
             },
         )
         if r.status_code != 200:
             log.warning(f"Gemini image failed: {r.status_code} {r.text[:200]}")
             return None
-        parts = r.json()["candidates"][0]["content"]["parts"]
-        for p in parts:
+        parts_resp = r.json()["candidates"][0]["content"]["parts"]
+        for p in parts_resp:
             if "inlineData" in p:
                 return p["inlineData"]["data"]
     return None
@@ -320,6 +338,22 @@ async def gemini_image(prompt: str) -> Optional[str]:
 def run_blocking(fn, *args):
     loop = asyncio.get_event_loop()
     return loop.run_in_executor(None, fn, *args)
+
+
+def _estimate_price(article: dict) -> Optional[int]:
+    """Rough indicative price per article based on dimensions."""
+    dims = article.get("dimensions_mm", {})
+    b = dims.get("b", {})
+    width = b.get("nominal", b.get("from", 0)) if isinstance(b, dict) else (b or 0)
+    try:
+        width = int(width)
+    except (TypeError, ValueError):
+        width = 600
+    if width <= 0:
+        width = 600
+    # Base: €700 per linear 300mm, scaled
+    base = max(400, int((width / 300) * 700))
+    return base
 
 
 def _mcp_call(name, args):
@@ -641,6 +675,98 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
                 name=item["name"],
                 dimensions_mm=item["dimensions_mm"],
                 chosen_options=item["chosen_options"],
+                price_eur=_estimate_price(item),
+            )
+            for item in catalog_items
+        ],
+        image_base64=image_b64,
+        catalog_valid=seq["kitchen_valid"],
+        gemini_prompt=img_prompt,
+    )
+
+
+@app.post("/adjust", response_model=GenerateResponse)
+async def adjust(req: AdjustRequest, x_api_key: str = Header(default="")):
+    if APP_API_KEY and x_api_key != APP_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    mcp.ensure_connected()
+
+    combined_prompt = f"{req.original_prompt}. Aanpassing: {req.adjustment}"
+
+    intent_prompt = f"""Je bent een Bruynzeel keuken configurator.
+Analyseer de keuken beschrijving inclusief de aanpassing en geef ALLEEN een JSON object terug (geen markdown):
+{{
+  "concept_name": "Korte Nederlandse naam voor dit concept",
+  "style": "one of: modern, klassiek, landelijk, industrieel, scandinavisch",
+  "color_description": "beschrijving van kastkleur/fineer in het Engels",
+  "worktop_description": "beschrijving van het aanrechtblad in het Engels",
+  "handle_description": "beschrijving van de grepen in het Engels",
+  "has_island": false,
+  "lookup_terms": ["NL termen voor lookup_option"],
+  "target_width_mm": 600,
+  "style_tags": ["tag1", "tag2", "tag3"],
+  "extra_description": "extra details voor beeldgeneratie in het Engels"
+}}
+
+Originele beschrijving: "{req.original_prompt}"
+Aanpassing: "{req.adjustment}"
+Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
+
+    try:
+        intent = await gemini_text(intent_prompt)
+    except Exception as e:
+        log.warning(f"Gemini intent failed: {e}")
+        intent = {
+            "concept_name": "Aangepaste Keuken",
+            "style": "modern",
+            "color_description": "warm natural wood",
+            "worktop_description": "white marble",
+            "handle_description": "knob handles",
+            "has_island": False,
+            "lookup_terms": ["knop", "eiken"],
+            "target_width_mm": 600,
+            "style_tags": [],
+            "extra_description": combined_prompt,
+        }
+
+    seq = await run_blocking(
+        _sacred_sequence,
+        intent.get("lookup_terms", ["knop"]),
+        intent.get("target_width_mm", 600),
+    )
+
+    catalog_items: list[dict] = []
+    for art in seq["articles"][:4]:
+        type_no = art.get("type_no", "")
+        chosen  = seq["selection"].get(type_no, {})
+        catalog_items.append({
+            "type_no":      type_no,
+            "name":         art.get("name", ""),
+            "dimensions_mm": art.get("dimensions_mm", {}),
+            "chosen_options": chosen,
+        })
+
+    # Build adjustment-focused image prompt
+    adj_intent = dict(intent)
+    adj_intent["extra_description"] = f"{intent.get('extra_description', '')}. Adjustment: {req.adjustment}"
+    img_prompt = _build_image_prompt(adj_intent, catalog_items)
+
+    # Use current image as reference for inpainting-style editing
+    image_b64 = await gemini_image(img_prompt, reference_b64=req.current_image_base64)
+
+    return GenerateResponse(
+        project_id=req.project_id,
+        concept_name=intent.get("concept_name", "Aangepaste Keuken"),
+        description=combined_prompt,
+        style_tags=intent.get("style_tags", []),
+        articles=[
+            ArticleResult(
+                type_no=item["type_no"],
+                name=item["name"],
+                dimensions_mm=item["dimensions_mm"],
+                chosen_options=item["chosen_options"],
+                price_eur=_estimate_price(item),
             )
             for item in catalog_items
         ],
