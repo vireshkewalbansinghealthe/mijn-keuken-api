@@ -35,7 +35,7 @@ from pydantic import BaseModel
 MCP_HOST    = os.getenv("MCP_HOST", "dkg-dev-dockerswarm-app-ingress.azurewebsites.net")
 MCP_BASE    = f"https://{MCP_HOST}/idm-mcp"
 MCP_API_KEY = os.getenv("MCP_API_KEY", "D0AF34E63F344B569DA861AF8D326E3F")
-GEMINI_KEY  = os.getenv("GEMINI_API_KEY", "AIzaSyCiy4UN2JL9D_UN8mIE-8MwpPYvjH40RKc")
+GEMINI_KEY  = os.getenv("GEMINI_API_KEY", "")
 APP_API_KEY = os.getenv("APP_API_KEY", "mijn-keuken-secret")
 
 GEMINI_TEXT_URL  = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
