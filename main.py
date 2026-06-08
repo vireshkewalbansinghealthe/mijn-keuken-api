@@ -4,13 +4,6 @@ Bridges the DKG MCP catalog server and the Flutter app.
 
 Flutter sends: POST /generate  → returns concept name + catalog config + Gemini kitchen image
 Flutter sends: GET  /health    → liveness check
-
-MCP findings (confirmed via test_deep.py / test_kitchen_build.py):
-  - NO images in catalog responses — only structured data (dims, features, option_keys)
-  - lookup_option works: "knop" → K012/K026/K028, "marmer" → MW05, "eiken" → EB/AE2/etc.
-  - search_articles: returns dimensions_mm with h/b/t (nominal, from, to, step, variable)
-  - validate_kitchen: returns kitchen_valid bool + per-article violations list
-  - Strategy: use MCP metadata to build a rich, dimension-accurate Gemini image prompt
 """
 
 import asyncio
@@ -29,6 +22,13 @@ import httpx
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# Load .env for local development
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -459,18 +459,79 @@ def _estimate_price(article: dict) -> Optional[int]:
     return base
 
 
-def _select_from_catalog(intent: dict, original_prompt: str = "") -> KeukenConfigModel:
+def _parse_onboarding_overrides(onboarding: list) -> dict:
+    """
+    Explicitly parse structured onboarding Q&A answers into config overrides.
+    These take precedence over Gemini intent extraction.
+    """
+    ov = {}
+    for item in onboarding:
+        q = item.get("question", "").lower()
+        a = item.get("answer", "").lower().strip()
+        if not a:
+            continue
+        if any(w in q for w in ["opstelling", "layout", "vorm", "keuken type"]):
+            ov["layout"] = a
+            ov["has_island"] = any(w in a for w in ["eiland", "island", "kookeiland"])
+        elif any(w in q for w in ["afzuig", "hood", "ventilatie", "kap"]):
+            ov["afzuiging"] = a
+        elif any(w in q for w in ["koffie", "coffee"]):
+            ov["wil_koffie"] = a in ("ja", "yes", "koffiemachine", "inbouw koffiemachine")
+        elif any(w in q for w in ["quooker", "kokend water", "boiling"]):
+            ov["wil_quooker"] = a in ("ja", "yes", "quooker", "kokend water kraan")
+        elif any(w in q for w in ["wijn", "wine"]):
+            ov["wil_wijn"] = a in ("ja", "yes", "wijnklimaatkast")
+        elif any(w in q for w in ["warmhoud", "warming"]):
+            ov["wil_warmhoud"] = a in ("ja", "yes", "warmhoudlade")
+        elif any(w in q for w in ["extra", "overig"]):
+            extras = [e.strip() for e in a.split(",")]
+            ov["wil_koffie"]   = ov.get("wil_koffie")   or any("koffie" in e for e in extras)
+            ov["wil_quooker"]  = ov.get("wil_quooker")  or any("quooker" in e for e in extras)
+            ov["wil_wijn"]     = ov.get("wil_wijn")     or any("wijn" in e for e in extras)
+            ov["wil_warmhoud"] = ov.get("wil_warmhoud") or any("warmhoud" in e for e in extras)
+    return ov
+
+
+def _select_from_catalog(intent: dict, original_prompt: str = "", overrides: Optional[dict] = None) -> KeukenConfigModel:
     """
     Select real Bruynzeel products based on AI intent.
     Everything comes from the real catalog — nothing is invented.
+    Onboarding overrides take precedence over Gemini intent.
     """
+    if overrides is None:
+        overrides = {}
     style = intent.get("style", "modern").lower()
-    has_island = intent.get("has_island", False)
+    # Overrides from explicit onboarding answers override Gemini
+    has_island = overrides.get("has_island", intent.get("has_island", False))
     kleur_desc = intent.get("color_description", "").lower()
     werkblad_desc = intent.get("worktop_description", "").lower()
     greep_desc = intent.get("handle_description", "").lower()
-    layout_pref = intent.get("layout", "").lower()
+    layout_pref = overrides.get("layout", intent.get("layout", "")).lower()
     app_merk = intent.get("apparatuur_merk", "").strip()
+
+    # ── Supplement with original prompt keywords (Gemini can miss them) ──────
+    orig_lower = original_prompt.lower()
+    # Upgrade style to "warm" if wood/natural terms are in prompt but style is generic modern
+    if style in ("modern", "") and any(w in orig_lower for w in [
+        "houtlook", "eiken", "hout", "wood", "naturel", "warm", "scandinavisch", "jura", "holten"
+    ]):
+        style = "warm"
+    # Supplement handle description from prompt
+    if not greep_desc or greep_desc in ("handleless", "bar handle"):
+        if any(w in orig_lower for w in ["goud", "gold", "brass", "messing", "gouden"]):
+            greep_desc = "gold knob"
+        elif any(w in orig_lower for w in ["knop", "knob"]):
+            greep_desc = "knob"
+        elif any(w in orig_lower for w in ["leer", "leather"]):
+            greep_desc = "leather"
+    # Supplement color description from prompt
+    if not kleur_desc:
+        if any(w in orig_lower for w in ["houtlook", "eiken", "hout", "wood"]):
+            kleur_desc = "oak wood"
+        elif any(w in orig_lower for w in ["donker", "dark", "antraciet", "coal"]):
+            kleur_desc = "dark"
+        elif any(w in orig_lower for w in ["wit", "white"]):
+            kleur_desc = "wit"
 
     # ── Select door model based on style ────────────────────────────────────
     style_prio: dict[str, list[str]] = {
@@ -521,7 +582,9 @@ def _select_from_catalog(intent: dict, original_prompt: str = "") -> KeukenConfi
         "design":         ["tip_on", "greeploos_greeplijst", "infreesgreep"],
     }
     g_prio = greep_prio.get(style, greep_prio["modern"])
-    if "knop" in greep_desc or "knob" in greep_desc:
+    if any(w in greep_desc for w in ["goud", "gold", "brass", "messing"]):
+        g_prio = ["knop_goud"] + g_prio
+    elif "knop" in greep_desc or "knob" in greep_desc:
         g_prio = ["knop_zwart", "knop_goud", "knop_nikkel"] + g_prio
     elif "greeploos" in greep_desc or "handleless" in greep_desc:
         g_prio = ["greeploos_greeplijst", "tip_on"] + g_prio
@@ -620,20 +683,36 @@ def _select_from_catalog(intent: dict, original_prompt: str = "") -> KeukenConfi
     else:
         app_items.append("Inbouwkoelkast")
 
-    # 6. Afzuigkap
-    if has_island or "eiland" in layout_pref:
+    # 6. Afzuigkap — onboarding override takes precedence
+    afzuiging_override = overrides.get("afzuiging", "")
+    if afzuiging_override:
+        afz_map = {
+            "wandafzuigkap": "Wandafzuigkap",
+            "plafondafzuigkap": "Plafond afzuigkap",
+            "plafond afzuigkap": "Plafond afzuigkap",
+            "geintegreerd": "Geïntegreerde afzuiging (kookplaat)",
+            "geïntegreerd": "Geïntegreerde afzuiging (kookplaat)",
+            "bora": "Geïntegreerde afzuiging (kookplaat)",
+            "inbouw telescopisch": "Inbouw telescopische afzuigkap",
+            "inbouw": "Inbouw telescopische afzuigkap",
+        }
+        mapped = next((v for k, v in afz_map.items() if k in afzuiging_override), afzuiging_override)
+        app_items.append(mapped)
+    elif has_island or "eiland" in layout_pref:
         app_items.append("Plafond afzuigkap")
     elif any(w in prompt_lower for w in ["bora", "kookplaat met afzuig"]):
         app_items.append("Geïntegreerde afzuiging (kookplaat)")
     else:
-        app_items.append("Afzuigkap")
+        app_items.append("Wandafzuigkap")
 
-    # 7. Optionals
-    if any(w in prompt_lower for w in ["koffie", "coffee", "barista", "espresso"]):
+    # 7. Optionals — check overrides first, then prompt keywords
+    if overrides.get("wil_koffie") or any(w in prompt_lower for w in ["koffie", "coffee", "barista", "espresso"]):
         app_items.append("Inbouw koffiemachine")
-    if any(w in prompt_lower for w in ["wijnklimat", "wine", "wijn"]):
+    if overrides.get("wil_quooker") or any(w in prompt_lower for w in ["quooker", "kokend water"]):
+        app_items.append("Quooker (kokend water kraan)")
+    if overrides.get("wil_wijn") or any(w in prompt_lower for w in ["wijnklimat", "wine", "wijn"]):
         app_items.append("Wijnklimaatkast")
-    if any(w in prompt_lower for w in ["warmhoud", "warming"]):
+    if overrides.get("wil_warmhoud") or any(w in prompt_lower for w in ["warmhoud", "warming"]):
         app_items.append("Warmhoudlade")
 
     # ── Select tap ────────────────────────────────────────────────────────────
@@ -649,11 +728,11 @@ def _select_from_catalog(intent: dict, original_prompt: str = "") -> KeukenConfi
         "design":         ["mengkraan_zwart", "koken_water"],
     }
     k_prio = kraan_prio.get(style, kraan_prio["modern"])
-    if any(w in prompt_lower for w in ["quooker", "kokend water", "boiling"]):
+    if any(w in prompt_lower for w in ["quooker", "kokend water", "boiling"]) or overrides.get("wil_quooker"):
         k_prio = ["koken_water"] + k_prio
-    elif any(w in prompt_lower for w in ["zwart", "black", "mat"]):
+    elif any(w in prompt_lower for w in ["zwart", "black", "mat"]) and not any(w in prompt_lower for w in ["goud", "gold"]):
         k_prio = ["mengkraan_zwart"] + k_prio
-    elif any(w in prompt_lower for w in ["goud", "gold", "brass", "messing"]):
+    elif any(w in prompt_lower for w in ["goud", "gold", "brass", "messing", "gouden"]):
         k_prio = ["mengkraan_goud"] + k_prio
     kraan = next((k for slug in k_prio for k in BRUYNZEEL_KRANEN if k["slug"] == slug), BRUYNZEEL_KRANEN[0])
 
@@ -927,8 +1006,10 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
 
     log.info(f"Intent: {intent.get('concept_name')} / {intent.get('style')}")
 
-    # ── 2. Select from real Bruynzeel catalog ─────────────────────────────────
-    config = _select_from_catalog(intent, original_prompt=req.prompt)
+    # ── 2. Parse onboarding overrides + select from catalog ──────────────────
+    ov = _parse_onboarding_overrides(req.onboarding)
+    log.info(f"Onboarding overrides: {ov}")
+    config = _select_from_catalog(intent, original_prompt=req.prompt, overrides=ov)
     log.info(f"Config: {config.deur_naam} / {config.werkblad_naam} / {config.greep_naam} / {config.kraan_naam}")
 
     # ── 3-6. Sacred MCP sequence for handelsartikelen validation ─────────────
@@ -1024,7 +1105,8 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
 
     intent["extra_description"] = f"{intent.get('extra_description','')}. Aanpassing: {req.adjustment}"
 
-    config = _select_from_catalog(intent, original_prompt=combined_prompt)
+    ov_adj = _parse_onboarding_overrides(req.onboarding)
+    config = _select_from_catalog(intent, original_prompt=combined_prompt, overrides=ov_adj)
 
     raw_terms_adj = intent.get("lookup_terms", [])
     lookup_terms_adj = list(dict.fromkeys(["kraan", "vaatwasser"] + [t for t in raw_terms_adj if t not in ("kraan", "vaatwasser")]))
