@@ -604,15 +604,24 @@ def _select_from_catalog(intent: dict, original_prompt: str = "", overrides: Opt
         "luxe":           ["quartsiet", "dekton_kelya", "composiet_statuario"],
     }
     w_prio = werkblad_prio.get(style, werkblad_prio["modern"])
-    if any(w in werkblad_desc for w in ["marmer","marble","calacatta","statuario","wit","white"]):
+    # Also supplement werkblad_desc from original prompt
+    full_werkblad = werkblad_desc + " " + orig_lower
+    is_dark = any(w in full_werkblad for w in ["zwart","black","nero","donker","dark","leisteen"])
+    is_marble = any(w in full_werkblad for w in ["marmer","marble","calacatta","statuario"])
+    if is_dark and is_marble:
+        # Dark marble → Dekton Kelya or Nero
+        w_prio = ["dekton_kelya","composiet_nero"] + w_prio
+    elif is_marble and not is_dark:
         w_prio = ["composiet_calacatta","composiet_statuario"] + w_prio
-    elif any(w in werkblad_desc for w in ["zwart","black","nero","donker"]):
+    elif any(w in full_werkblad for w in ["wit","white"]) and not is_dark:
+        w_prio = ["keramiek_wit","composiet_calacatta"] + w_prio
+    elif is_dark:
         w_prio = ["composiet_nero","dekton_kelya","keramiek_beton"] + w_prio
-    elif any(w in werkblad_desc for w in ["beton","concrete","cement","industrieel"]):
+    elif any(w in full_werkblad for w in ["beton","concrete","cement","industrieel"]):
         w_prio = ["keramiek_beton","composiet_nero"] + w_prio
-    elif any(w in werkblad_desc for w in ["eiken","hout","wood","oak","naturel"]):
+    elif any(w in full_werkblad for w in ["eiken","hout","wood","oak","naturel"]):
         w_prio = ["hpl_eiken","greengridz"] + w_prio
-    elif any(w in werkblad_desc for w in ["keramiek","ceramic"]):
+    elif any(w in full_werkblad for w in ["keramiek","ceramic"]):
         w_prio = ["keramiek_wit","keramiek_beton"] + w_prio
     werkblad = next((w for slug in w_prio for w in BRUYNZEEL_WERKBLADEN if w["slug"] == slug), BRUYNZEEL_WERKBLADEN[0])
 
