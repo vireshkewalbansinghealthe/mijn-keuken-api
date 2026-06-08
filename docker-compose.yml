@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8765:8000"
+    environment:
+      MCP_HOST: ${MCP_HOST:-dkg-dev-dockerswarm-app-ingress.azurewebsites.net}
+      MCP_API_KEY: ${MCP_API_KEY:-D0AF34E63F344B569DA861AF8D326E3F}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      APP_API_KEY: ${APP_API_KEY:-mijn-keuken-secret}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
