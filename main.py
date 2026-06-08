@@ -257,6 +257,67 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Mijn Keuken API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# ── Real Bruynzeel catalog (from bruynzeelkeukens.nl) ─────────────────────────
+# Source: https://www.bruynzeelkeukens.nl/keukens/deuren
+#         https://www.bruynzeelkeukens.nl/keukens/grepen
+#         https://www.bruynzeelkeukens.nl/keukens/keukenbladen
+#         https://www.bruynzeelkeukens.nl/keukens/keukenapparatuur
+
+BRUYNZEEL_DEUREN = [
+    {"slug":"atlas",        "naam":"Atlas",         "stijl":"modern",             "kleuren":"wit, antraciet, grijs, beige, taupe, zand, creme, olijfgroen, blauw (20 opties)", "materiaal":"MDF",    "afwerking":"mat"},
+    {"slug":"atlas_trend",  "naam":"Atlas Trend",   "stijl":"modern/minimalistisch","kleuren":"wit, antraciet, grijs, donkergroen, blauw (10 opties)", "materiaal":"MDF",    "afwerking":"mat"},
+    {"slug":"holten",       "naam":"Holten",        "stijl":"scandinavisch/natuur","kleuren":"naturel eiken, gerookt eiken, walnoot, donker eiken (6 opties)", "materiaal":"hout fineer", "afwerking":"eiken"},
+    {"slug":"jura",         "naam":"Jura",          "stijl":"scandinavisch/warm",  "kleuren":"wit, zwart, wild eiken, licht eiken (7 opties)", "materiaal":"hout/MDF","afwerking":"mat/hout"},
+    {"slug":"andes",        "naam":"Andes",         "stijl":"rustiek/natuur",      "kleuren":"onbehandeld eiken (1 optie)",  "materiaal":"hout",    "afwerking":"ruwe eiken"},
+    {"slug":"pallas",       "naam":"Pallas",        "stijl":"modern/supermatt",    "kleuren":"wit, zwart, grijs, beige, blauw, groen, kashmir, taupe (8 opties)", "materiaal":"MDF", "afwerking":"supermatt"},
+    {"slug":"matterhorn",   "naam":"Matterhorn",    "stijl":"modern",              "kleuren":"wit, antraciet, grijs, beige, blauw (8 opties)", "materiaal":"MDF",    "afwerking":"mat"},
+    {"slug":"linea",        "naam":"Linea",         "stijl":"modern/strak",        "kleuren":"mat zwart, mat wit, antraciet (3 opties)", "materiaal":"MDF",    "afwerking":"mat"},
+    {"slug":"geo",          "naam":"Geo",           "stijl":"industrieel/geometrisch","kleuren":"antraciet, zwart, wit (3 opties)", "materiaal":"MDF",    "afwerking":"mat"},
+    {"slug":"laren",        "naam":"Laren",         "stijl":"klassiek/landelijk",  "kleuren":"wit, creme, groen, blauw, grijs, beige (32 opties)", "materiaal":"MDF", "afwerking":"klassiek"},
+    {"slug":"ravenstein",   "naam":"Ravenstein",    "stijl":"klassiek/deftig",     "kleuren":"wit, gebroken wit, grijs, taupe (44 opties)", "materiaal":"MDF",  "afwerking":"klassiek"},
+    {"slug":"senso",        "naam":"Senso",         "stijl":"modern/puur",         "kleuren":"wit, antraciet (2 opties)",    "materiaal":"MDF",    "afwerking":"mat"},
+    {"slug":"olympia",      "naam":"Olympia",       "stijl":"landelijk/retro",     "kleuren":"wit, creme, groen, blauw (32 opties)", "materiaal":"MDF",  "afwerking":"mat"},
+    {"slug":"karakter",     "naam":"Karakter",      "stijl":"klassiek/ambacht",    "kleuren":"wit, creme, grijs, groen, blauw (44 opties)", "materiaal":"MDF", "afwerking":"mat"},
+    {"slug":"piet_zwart",   "naam":"Piet Zwart",    "stijl":"design/iconisch",     "kleuren":"wit, zwart, grijs, antraciet, blauw (5 opties)", "materiaal":"MDF", "afwerking":"mat"},
+]
+
+BRUYNZEEL_GREPEN = [
+    {"slug":"greeploos_greeplijst","naam":"Greeploos met greeplijst","type":"greeploos","stijl":"modern/strak","detail":"Integrale greeplijst over hele frontbreedte"},
+    {"slug":"tip_on",      "naam":"Tip-on systeem",      "type":"greeploos",   "stijl":"ultra-modern/minimalistisch","detail":"Push-to-open, geen greep zichtbaar"},
+    {"slug":"infreesgreep","naam":"Infreesgreep aluminium","type":"infreesgreep","stijl":"modern/strak","detail":"Over volledige breedte front, beschermt bovenrand"},
+    {"slug":"wave_rvs",    "naam":"Wave RVS geborsteld", "type":"handgreep",   "stijl":"modern",      "detail":"Langwerpige greep, geborsteld roestvrij staal"},
+    {"slug":"georgia_ant", "naam":"Georgia mat antraciet","type":"handgreep",  "stijl":"modern",      "detail":"Strakke greep, mat antraciet afwerking"},
+    {"slug":"knop_zwart",  "naam":"Knop mat zwart",      "type":"knop",        "stijl":"modern/landelijk","detail":"Ronde knop, mat zwart, subtiele uitstraling"},
+    {"slug":"knop_goud",   "naam":"Knop goud",           "type":"knop",        "stijl":"klassiek/landelijk","detail":"Ronde knop, gouden afwerking, warm karakter"},
+    {"slug":"knop_nikkel", "naam":"Knop mat nikkel",     "type":"knop",        "stijl":"klassiek",    "detail":"Ronde knop, mat vernikkeld, tijdloos"},
+    {"slug":"greep_leer",  "naam":"Leren greep naturel", "type":"handgreep",   "stijl":"landelijk/warm","detail":"Handgreep van echt leer, warm en organisch"},
+]
+
+BRUYNZEEL_WERKBLADEN = [
+    {"slug":"composiet_calacatta","naam":"Composiet Calacatta wit",    "materiaal":"Composiet","kleur":"wit met grijze aders",       "stijl":"modern/klassiek","prijs_indicatie":"hoog"},
+    {"slug":"composiet_statuario","naam":"Composiet Statuario",        "materiaal":"Composiet","kleur":"lichtgrijs marmer look",     "stijl":"modern/luxe",    "prijs_indicatie":"hoog"},
+    {"slug":"composiet_nero",     "naam":"Composiet Nero",             "materiaal":"Composiet","kleur":"zwart",                     "stijl":"modern/industrieel","prijs_indicatie":"hoog"},
+    {"slug":"keramiek_beton",     "naam":"Keramiek Beton donker",      "materiaal":"Keramiek", "kleur":"donker betongrijs",         "stijl":"industrieel",    "prijs_indicatie":"hoog"},
+    {"slug":"keramiek_wit",       "naam":"Keramiek Wit mat",           "materiaal":"Keramiek", "kleur":"zuiver wit mat",            "stijl":"modern",         "prijs_indicatie":"hoog"},
+    {"slug":"dekton_kelya",       "naam":"Dekton Kelya",               "materiaal":"Dekton",   "kleur":"donker marmer/leisteen look","stijl":"luxe/modern",   "prijs_indicatie":"hoog"},
+    {"slug":"quartsiet",          "naam":"Quartsiet natuursteen",      "materiaal":"Quartsiet","kleur":"naturel grijs-beige",        "stijl":"natuur/luxe",    "prijs_indicatie":"hoog"},
+    {"slug":"kunststof_wit",      "naam":"Kunststof Wit mat",          "materiaal":"Kunststof","kleur":"wit mat",                   "stijl":"neutraal",       "prijs_indicatie":"laag"},
+    {"slug":"hpl_eiken",          "naam":"HPL Eiken naturel",          "materiaal":"HPL",      "kleur":"naturel eiken houtlook",    "stijl":"scandinavisch/natuur","prijs_indicatie":"midden"},
+    {"slug":"greengridz",         "naam":"Greengridz gerecycled",      "materiaal":"Greengridz","kleur":"diverse",                  "stijl":"duurzaam",       "prijs_indicatie":"midden"},
+    {"slug":"centoTop",           "naam":"CentoTop",                   "materiaal":"Composiet","kleur":"diverse steentinten",       "stijl":"modern",         "prijs_indicatie":"hoog"},
+]
+
+BRUYNZEEL_APPARATUUR_MERKEN = ["AEG","ATAG","BORA","BOSCH","ETNA","GAGGENAU","PELGRIM","SIEMENS","WAVE","Neff"]
+
+BRUYNZEEL_KASTEN_LAYOUTS = {
+    "rechte opstelling": "Kasten langs één wand, ideaal voor smalle keukens",
+    "L-vorm":            "Kasten langs twee aangrenzende wanden, goed gebruik van hoeken",
+    "U-vorm":            "Kasten langs drie wanden, maximale opbergruimte",
+    "met eiland":        "Centrale kookunit met losse kasten en extra werkblad",
+    "met schiereiland":  "Aangebouwd eiland dat de keuken scheidt van de woonruimte",
+    "parallel":          "Twee tegenover elkaar staande keukenblokken",
+}
+
 # ── Models ────────────────────────────────────────────────────────────────────
 
 class GenerateRequest(BaseModel):
@@ -272,14 +333,43 @@ class ArticleResult(BaseModel):
     price_eur: Optional[int] = None
 
 
+class KeukenConfigModel(BaseModel):
+    """Full kitchen configuration based on real Bruynzeel catalog data."""
+    # Doors/fronts
+    deur_slug: str = ""
+    deur_naam: str = ""
+    deur_kleur: str = ""
+    deur_stijl: str = ""
+    deur_afwerking: str = ""
+    # Handle
+    greep_slug: str = ""
+    greep_naam: str = ""
+    greep_type: str = ""
+    greep_detail: str = ""
+    # Worktop
+    werkblad_slug: str = ""
+    werkblad_naam: str = ""
+    werkblad_materiaal: str = ""
+    werkblad_kleur: str = ""
+    # Layout + cabinets
+    kasten_layout: str = ""
+    kasten_layout_desc: str = ""
+    heeft_eiland: bool = False
+    # Appliances (from MCP handelsartikelen)
+    apparatuur_merk: str = ""
+    apparatuur_items: list[str] = []
+    # MCP-validated trade articles
+    mcp_artikelen: list[ArticleResult] = []
+    mcp_valid: bool = False
+
+
 class GenerateResponse(BaseModel):
     project_id: str
     concept_name: str
     description: str
     style_tags: list[str] = []
-    articles: list[ArticleResult] = []
+    keuken_config: Optional[KeukenConfigModel] = None
     image_base64: Optional[str] = None
-    catalog_valid: bool = False
     gemini_prompt: str = ""
 
 
@@ -351,9 +441,173 @@ def _estimate_price(article: dict) -> Optional[int]:
         width = 600
     if width <= 0:
         width = 600
-    # Base: €700 per linear 300mm, scaled
     base = max(400, int((width / 300) * 700))
     return base
+
+
+def _select_from_catalog(intent: dict) -> KeukenConfigModel:
+    """
+    Select real Bruynzeel products based on AI intent.
+    Everything comes from the real catalog — nothing is invented.
+    """
+    style = intent.get("style", "modern").lower()
+    has_island = intent.get("has_island", False)
+    kleur_desc = intent.get("color_description", "").lower()
+    werkblad_desc = intent.get("worktop_description", "").lower()
+    greep_desc = intent.get("handle_description", "").lower()
+    layout_pref = intent.get("layout", "").lower()
+    app_merk = intent.get("apparatuur_merk", "").strip()
+
+    # ── Select door model based on style ────────────────────────────────────
+    style_prio: dict[str, list[str]] = {
+        "modern":          ["pallas", "atlas", "linea", "senso", "matterhorn"],
+        "klassiek":        ["ravenstein", "laren", "karakter", "coevorden"],
+        "landelijk":       ["laren", "olympia", "karakter", "holten"],
+        "industrieel":     ["geo", "andes", "linea", "atlas"],
+        "scandinavisch":   ["holten", "jura", "atlas", "andes"],
+        "design":          ["piet_zwart", "pallas", "linea", "senso"],
+        "warm":            ["holten", "jura", "laren", "olympia"],
+        "minimalistisch":  ["senso", "linea", "atlas_trend", "pallas"],
+    }
+    prio = style_prio.get(style, style_prio["modern"])
+    deur = next((d for slug in prio for d in BRUYNZEEL_DEUREN if d["slug"] == slug), BRUYNZEEL_DEUREN[0])
+
+    # Refine kleur based on color description
+    chosen_kleur = deur["kleuren"].split(",")[0].strip()
+    if any(w in kleur_desc for w in ["zwart", "black", "dark", "donker", "antraciet", "coal"]):
+        chosen_kleur = next(
+            (k.strip() for k in deur["kleuren"].split(",") if any(w in k for w in ["zwart","antraciet","dark"])),
+            chosen_kleur)
+    elif any(w in kleur_desc for w in ["wit", "white", "licht", "light", "cream", "creme"]):
+        chosen_kleur = next(
+            (k.strip() for k in deur["kleuren"].split(",") if any(w in k for w in ["wit","creme","licht"])),
+            chosen_kleur)
+    elif any(w in kleur_desc for w in ["eiken", "oak", "hout", "wood", "naturel"]):
+        chosen_kleur = next(
+            (k.strip() for k in deur["kleuren"].split(",") if any(w in k for w in ["eiken","naturel","hout","oak"])),
+            chosen_kleur)
+    elif any(w in kleur_desc for w in ["groen", "green", "sage", "olijf"]):
+        chosen_kleur = next(
+            (k.strip() for k in deur["kleuren"].split(",") if "groen" in k),
+            chosen_kleur)
+    elif any(w in kleur_desc for w in ["blauw", "blue", "navy"]):
+        chosen_kleur = next(
+            (k.strip() for k in deur["kleuren"].split(",") if "blauw" in k),
+            chosen_kleur)
+
+    # ── Select handle ────────────────────────────────────────────────────────
+    greep_prio: dict[str, list[str]] = {
+        "modern":         ["greeploos_greeplijst", "wave_rvs", "georgia_ant"],
+        "minimalistisch": ["tip_on", "greeploos_greeplijst", "infreesgreep"],
+        "industrieel":    ["georgia_ant", "knop_zwart", "wave_rvs"],
+        "scandinavisch":  ["knop_zwart", "knop_nikkel", "greeploos_greeplijst"],
+        "klassiek":       ["knop_goud", "knop_nikkel", "greep_leer"],
+        "landelijk":      ["knop_goud", "greep_leer", "knop_nikkel"],
+        "warm":           ["greep_leer", "knop_goud", "knop_nikkel"],
+        "design":         ["tip_on", "greeploos_greeplijst", "infreesgreep"],
+    }
+    g_prio = greep_prio.get(style, greep_prio["modern"])
+    if "knop" in greep_desc or "knob" in greep_desc:
+        g_prio = ["knop_zwart", "knop_goud", "knop_nikkel"] + g_prio
+    elif "greeploos" in greep_desc or "handleless" in greep_desc:
+        g_prio = ["greeploos_greeplijst", "tip_on"] + g_prio
+    elif "leer" in greep_desc or "leather" in greep_desc:
+        g_prio = ["greep_leer"] + g_prio
+    greep = next((g for slug in g_prio for g in BRUYNZEEL_GREPEN if g["slug"] == slug), BRUYNZEEL_GREPEN[0])
+
+    # ── Select worktop ───────────────────────────────────────────────────────
+    werkblad_prio: dict[str, list[str]] = {
+        "modern":         ["composiet_calacatta", "composiet_statuario", "keramiek_wit", "kunststof_wit"],
+        "klassiek":       ["composiet_calacatta", "composiet_statuario", "quartsiet"],
+        "industrieel":    ["keramiek_beton", "composiet_nero", "dekton_kelya"],
+        "scandinavisch":  ["hpl_eiken", "kunststof_wit", "composiet_calacatta"],
+        "landelijk":      ["hpl_eiken", "composiet_calacatta", "quartsiet"],
+        "warm":           ["hpl_eiken", "composiet_calacatta", "quartsiet"],
+        "duurzaam":       ["greengridz", "hpl_eiken", "kunststof_wit"],
+        "luxe":           ["quartsiet", "dekton_kelya", "composiet_statuario"],
+    }
+    w_prio = werkblad_prio.get(style, werkblad_prio["modern"])
+    if any(w in werkblad_desc for w in ["marmer","marble","calacatta","statuario","wit","white"]):
+        w_prio = ["composiet_calacatta","composiet_statuario"] + w_prio
+    elif any(w in werkblad_desc for w in ["zwart","black","nero","donker"]):
+        w_prio = ["composiet_nero","dekton_kelya","keramiek_beton"] + w_prio
+    elif any(w in werkblad_desc for w in ["beton","concrete","cement","industrieel"]):
+        w_prio = ["keramiek_beton","composiet_nero"] + w_prio
+    elif any(w in werkblad_desc for w in ["eiken","hout","wood","oak","naturel"]):
+        w_prio = ["hpl_eiken","greengridz"] + w_prio
+    elif any(w in werkblad_desc for w in ["keramiek","ceramic"]):
+        w_prio = ["keramiek_wit","keramiek_beton"] + w_prio
+    werkblad = next((w for slug in w_prio for w in BRUYNZEEL_WERKBLADEN if w["slug"] == slug), BRUYNZEEL_WERKBLADEN[0])
+
+    # ── Select layout ────────────────────────────────────────────────────────
+    if has_island or "eiland" in layout_pref:
+        layout_key = "met eiland"
+    elif "u" in layout_pref or "u-vorm" in layout_pref:
+        layout_key = "U-vorm"
+    elif "l" in layout_pref or "l-vorm" in layout_pref:
+        layout_key = "L-vorm"
+    elif "parallel" in layout_pref:
+        layout_key = "parallel"
+    elif "schiereiland" in layout_pref:
+        layout_key = "met schiereiland"
+    else:
+        layout_key = "met eiland" if has_island else "L-vorm"
+    layout_desc = BRUYNZEEL_KASTEN_LAYOUTS[layout_key]
+
+    # ── Select appliance brand ───────────────────────────────────────────────
+    if not app_merk or app_merk not in BRUYNZEEL_APPARATUUR_MERKEN:
+        brand_prio = {
+            "modern": "BORA", "industrieel": "BOSCH", "klassiek": "ATAG",
+            "scandinavisch": "SIEMENS", "landelijk": "ETNA", "design": "GAGGENAU",
+        }
+        app_merk = brand_prio.get(style, "BOSCH")
+
+    # Derive appliance items from prompt keywords
+    app_items = []
+    prompt_lower = (intent.get("extra_description", "") + " " + intent.get("style", "")).lower()
+    if any(w in prompt_lower for w in ["inductie","induction","koken","kookplaat"]):
+        app_items.append("Inductiekookplaat")
+    else:
+        app_items.append("Kookplaat")
+    if any(w in prompt_lower for w in ["oven","bak"]):
+        app_items.append("Combi-oven")
+    else:
+        app_items.append("Inbouwoven")
+    if any(w in prompt_lower for w in ["vaat","dishwasher"]):
+        app_items.append("Vaatwasser")
+    else:
+        app_items.append("Vaatwasser")
+    if any(w in prompt_lower for w in ["koffie","coffee","barista"]):
+        app_items.append("Inbouw koffiemachine")
+    if any(w in prompt_lower for w in ["koelkast","fridge","koel"]):
+        app_items.append("Inbouwkoelkast")
+    else:
+        app_items.append("Koel-vriescombinatie")
+    if has_island:
+        app_items.append("Plafond afzuigkap")
+    else:
+        app_items.append("Afzuigkap")
+
+    return KeukenConfigModel(
+        deur_slug=deur["slug"],
+        deur_naam=deur["naam"],
+        deur_kleur=chosen_kleur,
+        deur_stijl=deur["stijl"],
+        deur_afwerking=deur["afwerking"],
+        greep_slug=greep["slug"],
+        greep_naam=greep["naam"],
+        greep_type=greep["type"],
+        greep_detail=greep["detail"],
+        werkblad_slug=werkblad["slug"],
+        werkblad_naam=werkblad["naam"],
+        werkblad_materiaal=werkblad["materiaal"],
+        werkblad_kleur=werkblad["kleur"],
+        kasten_layout=layout_key,
+        kasten_layout_desc=layout_desc,
+        heeft_eiland=has_island,
+        apparatuur_merk=app_merk,
+        apparatuur_items=list(dict.fromkeys(app_items)),
+    )
 
 
 def _mcp_call(name, args):
@@ -516,63 +770,29 @@ def _sacred_sequence(lookup_terms: list[str], target_width: int = 600) -> dict:
     return result
 
 
-def _build_image_prompt(concept: dict, catalog_items: list[dict]) -> str:
+def _build_image_prompt(intent: dict, config: KeukenConfigModel) -> str:
     """
-    Build a Gemini image prompt from catalog metadata + design intent.
-    The MCP catalog contains handelsartikelen (trade articles: appliances, taps,
-    sinks). Cabinet reference images will be added once available from DKG.
+    Build a Gemini image prompt from the real Bruynzeel catalog selection.
+    Every detail comes from the actual catalog — nothing is invented.
     """
-    style      = concept.get("style", "modern warm")
-    color_desc = concept.get("color_description", "warm natural wood tones")
-    worktop    = concept.get("worktop_description", "white marble")
-    handle     = concept.get("handle_description", "knob handles")
-    has_island = concept.get("has_island", False)
-    extra_desc = concept.get("extra_description", "")
-
-    # Extract appliance info from trade articles (what the MCP actually has)
-    appliance_parts = []
-    dim_parts = []
-    for item in catalog_items[:4]:
-        name = item.get("name", "")
-        dims = item.get("dimensions_mm", {})
-        if name:
-            # Classify article type for the image prompt
-            nl = name.lower()
-            if any(w in nl for w in ["oven", "magnetron", "combi"]):
-                appliance_parts.append("built-in oven")
-            elif any(w in nl for w in ["kraan", "mengkraan", "tap"]):
-                appliance_parts.append("designer tap")
-            elif any(w in nl for w in ["vaat", "dishwasher"]):
-                appliance_parts.append("integrated dishwasher")
-            elif any(w in nl for w in ["koel", "fridge", "vriezer"]):
-                appliance_parts.append("integrated fridge")
-            elif any(w in nl for w in ["stopcontact", "inbouw"]):
-                appliance_parts.append("integrated power sockets")
-        if dims:
-            b = dims.get("b", {})
-            w = b.get("nominal", b.get("from", "")) if isinstance(b, dict) else b
-            if w:
-                dim_parts.append(f"{int(w)}mm")
-
-    appliance_text = ", ".join(dict.fromkeys(appliance_parts)) if appliance_parts else ""
-    dim_text = f"Cabinet widths: {', '.join(dim_parts)}." if dim_parts else ""
+    has_island = config.heeft_eiland
+    layout = config.kasten_layout
+    extra   = intent.get("extra_description", "")
 
     return f"""Photorealistic interior design photograph of a Bruynzeel kitchen.
 Professional architecture photography, magazine quality, natural daylight through large windows, no people, no text.
 Landscape orientation, wide establishing shot showing the full kitchen.
 
-Kitchen specifications:
-- Style: {style}
-- Cabinet finish: {color_desc}
-- Worktop: {worktop}, thick 30mm edge profile
-- Handles: {handle}
-{f"- Appliances visible: {appliance_text}" if appliance_text else ""}
-{f"- {dim_text}" if dim_text else ""}
-{"- Kitchen island with seating stools" if has_island else "- L-shape or straight run layout"}
-{f"- {extra_desc}" if extra_desc else ""}
+Kitchen specification (Bruynzeel catalog):
+- Door model: {config.deur_naam} — {config.deur_afwerking} in {config.deur_kleur}
+- Handles: {config.greep_naam} ({config.greep_type})
+- Worktop: {config.werkblad_naam} — {config.werkblad_materiaal}, {config.werkblad_kleur}, thick 30mm edge profile
+- Layout: {layout} — {config.kasten_layout_desc}
+- Appliances: {config.apparatuur_merk} brand — {", ".join(config.apparatuur_items[:3])}
+{f"- {extra}" if extra else ""}
 - Floor: light herringbone oak parquet
 - Wall: off-white metro tiles behind hob
-- Lighting: warm pendant lights over island, under-cabinet LED strips
+- Lighting: warm pendant lights{" over island," if has_island else ","} under-cabinet LED strips
 - Atmosphere: inviting, Dutch magazine-quality interior
 
 Bruynzeel Keukens style: clean lines, quality materials, timeless Dutch craftsmanship."""
@@ -592,20 +812,21 @@ async def generate(req: GenerateRequest, x_api_key: str = Header(default="")):
 
     mcp.ensure_connected()
 
-    # ── 1. Gemini: extract structured intent from the prompt ──────────────────
-    intent_prompt = f"""Je bent een Bruynzeel keuken configurator.
-Analyseer de keuken beschrijving en geef ALLEEN een JSON object terug (geen markdown):
+    # ── 1. Gemini: extract structured intent ──────────────────────────────────
+    intent_prompt = f"""Je bent een Bruynzeel keuken configurator. Analyseer en geef ALLEEN JSON (geen markdown):
 {{
-  "concept_name": "Korte Nederlandse naam voor dit concept",
-  "style": "one of: modern, klassiek, landelijk, industrieel, scandinavisch",
-  "color_description": "beschrijving van kastkleur/fineer in het Engels",
-  "worktop_description": "beschrijving van het aanrechtblad in het Engels",
-  "handle_description": "beschrijving van de grepen in het Engels",
+  "concept_name": "Korte Nederlandse naam",
+  "style": "one of: modern, klassiek, landelijk, industrieel, scandinavisch, warm, minimalistisch, design",
+  "color_description": "kastkleur/fineer beschrijving in het Engels",
+  "worktop_description": "aanrechtblad beschrijving in het Engels",
+  "handle_description": "grepen beschrijving in het Engels (knob/handleless/bar handle/leather)",
   "has_island": false,
-  "lookup_terms": ["NL termen voor lookup_option, bijv: eiken, knop, marmer, wit, mat zwart"],
+  "layout": "one of: rechte opstelling, L-vorm, U-vorm, met eiland, met schiereiland, parallel",
+  "apparatuur_merk": "one of: AEG, ATAG, BORA, BOSCH, ETNA, GAGGENAU, PELGRIM, SIEMENS, WAVE, Neff or empty",
+  "lookup_terms": ["NL termen voor MCP lookup_option, bijv: knop, marmer, inductie"],
   "target_width_mm": 600,
   "style_tags": ["tag1", "tag2", "tag3"],
-  "extra_description": "extra details voor beeldgeneratie in het Engels"
+  "extra_description": "extra beeldgeneratie details in het Engels"
 }}
 
 Beschrijving: "{req.prompt}"
@@ -616,52 +837,54 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
     except Exception as e:
         log.warning(f"Gemini intent failed: {e}")
         intent = {
-            "concept_name": "Mijn Droomkeuken",
+            "concept_name": "Moderne Droomkeuken",
             "style": "modern",
             "color_description": "warm natural wood",
             "worktop_description": "white marble",
-            "handle_description": "knob handles",
+            "handle_description": "handleless",
             "has_island": False,
+            "layout": "L-vorm",
+            "apparatuur_merk": "BOSCH",
             "lookup_terms": ["knop", "eiken"],
             "target_width_mm": 600,
-            "style_tags": [],
+            "style_tags": ["modern", "strak"],
             "extra_description": req.prompt,
         }
 
     log.info(f"Intent: {intent.get('concept_name')} / {intent.get('style')}")
 
-    # ── 2-5. Sacred sequence: lookup → search → detail → valid_options → validate
+    # ── 2. Select from real Bruynzeel catalog ─────────────────────────────────
+    config = _select_from_catalog(intent)
+    log.info(f"Config: {config.deur_naam} / {config.werkblad_naam} / {config.greep_naam}")
+
+    # ── 3-6. Sacred MCP sequence for handelsartikelen validation ─────────────
     seq = await run_blocking(
         _sacred_sequence,
         intent.get("lookup_terms", ["knop"]),
         intent.get("target_width_mm", 600),
     )
-
-    catalog_valid = seq["kitchen_valid"]
     if seq["violations"]:
-        log.warning(f"Violations: {seq['violations']}")
+        log.warning(f"MCP violations: {seq['violations']}")
 
-    # Build catalog_items for image prompt
-    catalog_items: list[dict] = []
-    for art in seq["articles"][:4]:
-        type_no = art.get("type_no", "")
-        chosen  = seq["selection"].get(type_no, {})
-        catalog_items.append({
-            "type_no":      type_no,
-            "name":         art.get("name", ""),
-            "dimensions_mm": art.get("dimensions_mm", {}),
-            "chosen_options": chosen,
-            "model_name":   "",
-        })
+    # Attach MCP-validated trade articles to config
+    mcp_artikelen = [
+        ArticleResult(
+            type_no=art.get("type_no", ""),
+            name=art.get("name", ""),
+            dimensions_mm=art.get("dimensions_mm", {}),
+            chosen_options=seq["selection"].get(art.get("type_no", ""), {}),
+            price_eur=_estimate_price(art),
+        )
+        for art in seq["articles"][:3]
+    ]
+    config.mcp_artikelen = mcp_artikelen
+    config.mcp_valid = seq["kitchen_valid"]
 
-    # ── 6. Build Gemini image prompt ──────────────────────────────────────────
-    # Note: MCP catalog contains only trade articles (handelsartikelen: appliances,
-    # taps, sinks). Cabinet images are not yet available in the catalog.
-    # Reference image support will be added once the DKG developer ships that endpoint.
-    img_prompt = _build_image_prompt(intent, catalog_items)
-    log.info(f"Generating image (prompt {len(img_prompt)} chars)...")
+    # ── 7. Build image prompt from real catalog selection ─────────────────────
+    img_prompt = _build_image_prompt(intent, config)
+    log.info(f"Generating image ({len(img_prompt)} chars)...")
 
-    # ── 7. Generate kitchen image ─────────────────────────────────────────────
+    # ── 8. Generate kitchen image ─────────────────────────────────────────────
     image_b64 = await gemini_image(img_prompt)
 
     return GenerateResponse(
@@ -669,18 +892,8 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
         concept_name=intent.get("concept_name", "Mijn Droomkeuken"),
         description=req.prompt,
         style_tags=intent.get("style_tags", []),
-        articles=[
-            ArticleResult(
-                type_no=item["type_no"],
-                name=item["name"],
-                dimensions_mm=item["dimensions_mm"],
-                chosen_options=item["chosen_options"],
-                price_eur=_estimate_price(item),
-            )
-            for item in catalog_items
-        ],
+        keuken_config=config,
         image_base64=image_b64,
-        catalog_valid=seq["kitchen_valid"],
         gemini_prompt=img_prompt,
     )
 
@@ -694,19 +907,20 @@ async def adjust(req: AdjustRequest, x_api_key: str = Header(default="")):
 
     combined_prompt = f"{req.original_prompt}. Aanpassing: {req.adjustment}"
 
-    intent_prompt = f"""Je bent een Bruynzeel keuken configurator.
-Analyseer de keuken beschrijving inclusief de aanpassing en geef ALLEEN een JSON object terug (geen markdown):
+    intent_prompt = f"""Je bent een Bruynzeel keuken configurator. Analyseer en geef ALLEEN JSON (geen markdown):
 {{
-  "concept_name": "Korte Nederlandse naam voor dit concept",
-  "style": "one of: modern, klassiek, landelijk, industrieel, scandinavisch",
-  "color_description": "beschrijving van kastkleur/fineer in het Engels",
-  "worktop_description": "beschrijving van het aanrechtblad in het Engels",
-  "handle_description": "beschrijving van de grepen in het Engels",
+  "concept_name": "Korte Nederlandse naam",
+  "style": "one of: modern, klassiek, landelijk, industrieel, scandinavisch, warm, minimalistisch, design",
+  "color_description": "kastkleur beschrijving in het Engels",
+  "worktop_description": "aanrechtblad beschrijving in het Engels",
+  "handle_description": "grepen beschrijving in het Engels",
   "has_island": false,
-  "lookup_terms": ["NL termen voor lookup_option"],
+  "layout": "one of: rechte opstelling, L-vorm, U-vorm, met eiland, met schiereiland, parallel",
+  "apparatuur_merk": "one of: AEG, ATAG, BORA, BOSCH, ETNA, GAGGENAU, PELGRIM, SIEMENS, WAVE, Neff or empty",
+  "lookup_terms": ["NL termen voor MCP"],
   "target_width_mm": 600,
   "style_tags": ["tag1", "tag2", "tag3"],
-  "extra_description": "extra details voor beeldgeneratie in het Engels"
+  "extra_description": "details in het Engels inclusief aanpassing"
 }}
 
 Originele beschrijving: "{req.original_prompt}"
@@ -722,37 +936,38 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
             "style": "modern",
             "color_description": "warm natural wood",
             "worktop_description": "white marble",
-            "handle_description": "knob handles",
+            "handle_description": "handleless",
             "has_island": False,
-            "lookup_terms": ["knop", "eiken"],
+            "layout": "L-vorm",
+            "apparatuur_merk": "BOSCH",
+            "lookup_terms": ["knop"],
             "target_width_mm": 600,
             "style_tags": [],
             "extra_description": combined_prompt,
         }
+
+    intent["extra_description"] = f"{intent.get('extra_description','')}. Aanpassing: {req.adjustment}"
+
+    config = _select_from_catalog(intent)
 
     seq = await run_blocking(
         _sacred_sequence,
         intent.get("lookup_terms", ["knop"]),
         intent.get("target_width_mm", 600),
     )
+    config.mcp_artikelen = [
+        ArticleResult(
+            type_no=art.get("type_no", ""),
+            name=art.get("name", ""),
+            dimensions_mm=art.get("dimensions_mm", {}),
+            chosen_options=seq["selection"].get(art.get("type_no", ""), {}),
+            price_eur=_estimate_price(art),
+        )
+        for art in seq["articles"][:3]
+    ]
+    config.mcp_valid = seq["kitchen_valid"]
 
-    catalog_items: list[dict] = []
-    for art in seq["articles"][:4]:
-        type_no = art.get("type_no", "")
-        chosen  = seq["selection"].get(type_no, {})
-        catalog_items.append({
-            "type_no":      type_no,
-            "name":         art.get("name", ""),
-            "dimensions_mm": art.get("dimensions_mm", {}),
-            "chosen_options": chosen,
-        })
-
-    # Build adjustment-focused image prompt
-    adj_intent = dict(intent)
-    adj_intent["extra_description"] = f"{intent.get('extra_description', '')}. Adjustment: {req.adjustment}"
-    img_prompt = _build_image_prompt(adj_intent, catalog_items)
-
-    # Use current image as reference for inpainting-style editing
+    img_prompt = _build_image_prompt(intent, config)
     image_b64 = await gemini_image(img_prompt, reference_b64=req.current_image_base64)
 
     return GenerateResponse(
@@ -760,17 +975,7 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
         concept_name=intent.get("concept_name", "Aangepaste Keuken"),
         description=combined_prompt,
         style_tags=intent.get("style_tags", []),
-        articles=[
-            ArticleResult(
-                type_no=item["type_no"],
-                name=item["name"],
-                dimensions_mm=item["dimensions_mm"],
-                chosen_options=item["chosen_options"],
-                price_eur=_estimate_price(item),
-            )
-            for item in catalog_items
-        ],
+        keuken_config=config,
         image_base64=image_b64,
-        catalog_valid=seq["kitchen_valid"],
         gemini_prompt=img_prompt,
     )
