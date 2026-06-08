@@ -333,6 +333,16 @@ class ArticleResult(BaseModel):
     price_eur: Optional[int] = None
 
 
+BRUYNZEEL_KRANEN = [
+    {"slug":"mengkraan_rvs",   "naam":"Mengkraan RVS geborsteld",  "stijl":"modern",    "detail":"Enkelhendel, RVS geborsteld, hoog design"},
+    {"slug":"mengkraan_zwart", "naam":"Mengkraan mat zwart",        "stijl":"modern/ind","detail":"Enkelhendel, mat zwart, industrieel karakter"},
+    {"slug":"koken_water",     "naam":"Quooker kokend water kraan", "stijl":"luxe",      "detail":"100°C direct, geïntegreerde boiler, 4-in-1"},
+    {"slug":"mengkraan_goud",  "naam":"Mengkraan geborsteld goud",  "stijl":"klassiek",  "detail":"Enkelhendel, gouden afwerking, warm accent"},
+    {"slug":"mengkraan_chroom","naam":"Mengkraan chroom",           "stijl":"klassiek/n","detail":"Tweehandels, chroom, tijdloze keuze"},
+    {"slug":"uittrek_rvs",     "naam":"Uittrekbare mengkraan RVS",  "stijl":"modern",    "detail":"Uittrekbare sproeikop, 360° draaibaar"},
+]
+
+
 class KeukenConfigModel(BaseModel):
     """Full kitchen configuration based on real Bruynzeel catalog data."""
     # Doors/fronts
@@ -351,11 +361,15 @@ class KeukenConfigModel(BaseModel):
     werkblad_naam: str = ""
     werkblad_materiaal: str = ""
     werkblad_kleur: str = ""
+    # Tap
+    kraan_slug: str = ""
+    kraan_naam: str = ""
+    kraan_detail: str = ""
     # Layout + cabinets
     kasten_layout: str = ""
     kasten_layout_desc: str = ""
     heeft_eiland: bool = False
-    # Appliances (from MCP handelsartikelen)
+    # Appliances
     apparatuur_merk: str = ""
     apparatuur_items: list[str] = []
     # MCP-validated trade articles
@@ -445,7 +459,7 @@ def _estimate_price(article: dict) -> Optional[int]:
     return base
 
 
-def _select_from_catalog(intent: dict) -> KeukenConfigModel:
+def _select_from_catalog(intent: dict, original_prompt: str = "") -> KeukenConfigModel:
     """
     Select real Bruynzeel products based on AI intent.
     Everything comes from the real catalog — nothing is invented.
@@ -562,31 +576,86 @@ def _select_from_catalog(intent: dict) -> KeukenConfigModel:
         }
         app_merk = brand_prio.get(style, "BOSCH")
 
-    # Derive appliance items from prompt keywords
+    # ── Build appliances — always complete set, refined by keywords ─────────
+    # Combine all text sources for keyword detection
+    prompt_lower = " ".join([
+        original_prompt,
+        intent.get("extra_description", ""),
+        intent.get("style", ""),
+        intent.get("color_description", ""),
+    ]).lower()
+
     app_items = []
-    prompt_lower = (intent.get("extra_description", "") + " " + intent.get("style", "")).lower()
-    if any(w in prompt_lower for w in ["inductie","induction","koken","kookplaat"]):
+
+    # 1. Kookplaat — always present, type depends on keywords
+    if any(w in prompt_lower for w in ["inductie", "induction"]):
         app_items.append("Inductiekookplaat")
+    elif any(w in prompt_lower for w in ["gas", "wok"]):
+        app_items.append("Gaskookplaat")
+    elif any(w in prompt_lower for w in ["bora", "domino"]):
+        app_items.append("Kookplaat met afzuiging (BORA)")
     else:
-        app_items.append("Kookplaat")
-    if any(w in prompt_lower for w in ["oven","bak"]):
-        app_items.append("Combi-oven")
+        app_items.append("Inductiekookplaat")  # default modern choice
+
+    # 2. Oven — always present
+    if any(w in prompt_lower for w in ["combi", "stoom", "steam"]):
+        app_items.append("Combi-stoomoven")
     else:
         app_items.append("Inbouwoven")
-    if any(w in prompt_lower for w in ["vaat","dishwasher"]):
-        app_items.append("Vaatwasser")
+
+    # 3. Magnetron — always present as separate unit
+    if any(w in prompt_lower for w in ["magnetron", "microwave", "combi-magnet"]):
+        app_items.append("Combi-magnetron")
     else:
-        app_items.append("Vaatwasser")
-    if any(w in prompt_lower for w in ["koffie","coffee","barista"]):
-        app_items.append("Inbouw koffiemachine")
-    if any(w in prompt_lower for w in ["koelkast","fridge","koel"]):
-        app_items.append("Inbouwkoelkast")
-    else:
+        app_items.append("Magnetron")
+
+    # 4. Vaatwasser — always present
+    app_items.append("Vaatwasser")
+
+    # 5. Koelkast — always present
+    if any(w in prompt_lower for w in ["amerikaans", "american"]):
+        app_items.append("Amerikaanse koelkast")
+    elif any(w in prompt_lower for w in ["koel-vriezer", "koel vriezer", "combinatie"]):
         app_items.append("Koel-vriescombinatie")
-    if has_island:
+    else:
+        app_items.append("Inbouwkoelkast")
+
+    # 6. Afzuigkap
+    if has_island or "eiland" in layout_pref:
         app_items.append("Plafond afzuigkap")
+    elif any(w in prompt_lower for w in ["bora", "kookplaat met afzuig"]):
+        app_items.append("Geïntegreerde afzuiging (kookplaat)")
     else:
         app_items.append("Afzuigkap")
+
+    # 7. Optionals
+    if any(w in prompt_lower for w in ["koffie", "coffee", "barista", "espresso"]):
+        app_items.append("Inbouw koffiemachine")
+    if any(w in prompt_lower for w in ["wijnklimat", "wine", "wijn"]):
+        app_items.append("Wijnklimaatkast")
+    if any(w in prompt_lower for w in ["warmhoud", "warming"]):
+        app_items.append("Warmhoudlade")
+
+    # ── Select tap ────────────────────────────────────────────────────────────
+    kraan_prio: dict[str, list[str]] = {
+        "modern":         ["uittrek_rvs", "mengkraan_rvs", "mengkraan_zwart"],
+        "minimalistisch": ["mengkraan_rvs", "mengkraan_zwart"],
+        "industrieel":    ["mengkraan_zwart", "uittrek_rvs"],
+        "scandinavisch":  ["mengkraan_rvs", "uittrek_rvs"],
+        "klassiek":       ["mengkraan_goud", "mengkraan_chroom"],
+        "landelijk":      ["mengkraan_goud", "mengkraan_chroom", "uittrek_rvs"],
+        "warm":           ["mengkraan_goud", "uittrek_rvs"],
+        "luxe":           ["koken_water", "mengkraan_goud"],
+        "design":         ["mengkraan_zwart", "koken_water"],
+    }
+    k_prio = kraan_prio.get(style, kraan_prio["modern"])
+    if any(w in prompt_lower for w in ["quooker", "kokend water", "boiling"]):
+        k_prio = ["koken_water"] + k_prio
+    elif any(w in prompt_lower for w in ["zwart", "black", "mat"]):
+        k_prio = ["mengkraan_zwart"] + k_prio
+    elif any(w in prompt_lower for w in ["goud", "gold", "brass", "messing"]):
+        k_prio = ["mengkraan_goud"] + k_prio
+    kraan = next((k for slug in k_prio for k in BRUYNZEEL_KRANEN if k["slug"] == slug), BRUYNZEEL_KRANEN[0])
 
     return KeukenConfigModel(
         deur_slug=deur["slug"],
@@ -602,6 +671,9 @@ def _select_from_catalog(intent: dict) -> KeukenConfigModel:
         werkblad_naam=werkblad["naam"],
         werkblad_materiaal=werkblad["materiaal"],
         werkblad_kleur=werkblad["kleur"],
+        kraan_slug=kraan["slug"],
+        kraan_naam=kraan["naam"],
+        kraan_detail=kraan["detail"],
         kasten_layout=layout_key,
         kasten_layout_desc=layout_desc,
         heeft_eiland=has_island,
@@ -823,11 +895,13 @@ async def generate(req: GenerateRequest, x_api_key: str = Header(default="")):
   "has_island": false,
   "layout": "one of: rechte opstelling, L-vorm, U-vorm, met eiland, met schiereiland, parallel",
   "apparatuur_merk": "one of: AEG, ATAG, BORA, BOSCH, ETNA, GAGGENAU, PELGRIM, SIEMENS, WAVE, Neff or empty",
-  "lookup_terms": ["NL termen voor MCP lookup_option, bijv: knop, marmer, inductie"],
+  "lookup_terms": ["altijd minimaal: kraan, vaatwasser + andere NL termen vanuit de prompt, bijv: knop, marmer, inductie"],
   "target_width_mm": 600,
   "style_tags": ["tag1", "tag2", "tag3"],
   "extra_description": "extra beeldgeneratie details in het Engels"
 }}
+
+BELANGRIJK: lookup_terms moet ALTIJD minimaal ["kraan", "vaatwasser"] bevatten, plus extra termen vanuit de klantwens.
 
 Beschrijving: "{req.prompt}"
 Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
@@ -854,13 +928,15 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
     log.info(f"Intent: {intent.get('concept_name')} / {intent.get('style')}")
 
     # ── 2. Select from real Bruynzeel catalog ─────────────────────────────────
-    config = _select_from_catalog(intent)
-    log.info(f"Config: {config.deur_naam} / {config.werkblad_naam} / {config.greep_naam}")
+    config = _select_from_catalog(intent, original_prompt=req.prompt)
+    log.info(f"Config: {config.deur_naam} / {config.werkblad_naam} / {config.greep_naam} / {config.kraan_naam}")
 
     # ── 3-6. Sacred MCP sequence for handelsartikelen validation ─────────────
+    raw_terms = intent.get("lookup_terms", [])
+    lookup_terms = list(dict.fromkeys(["kraan", "vaatwasser"] + [t for t in raw_terms if t not in ("kraan", "vaatwasser")]))
     seq = await run_blocking(
         _sacred_sequence,
-        intent.get("lookup_terms", ["knop"]),
+        lookup_terms,
         intent.get("target_width_mm", 600),
     )
     if seq["violations"]:
@@ -948,11 +1024,13 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
 
     intent["extra_description"] = f"{intent.get('extra_description','')}. Aanpassing: {req.adjustment}"
 
-    config = _select_from_catalog(intent)
+    config = _select_from_catalog(intent, original_prompt=combined_prompt)
 
+    raw_terms_adj = intent.get("lookup_terms", [])
+    lookup_terms_adj = list(dict.fromkeys(["kraan", "vaatwasser"] + [t for t in raw_terms_adj if t not in ("kraan", "vaatwasser")]))
     seq = await run_blocking(
         _sacred_sequence,
-        intent.get("lookup_terms", ["knop"]),
+        lookup_terms_adj,
         intent.get("target_width_mm", 600),
     )
     config.mcp_artikelen = [
