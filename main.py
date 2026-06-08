@@ -1,9 +1,16 @@
 """
 Bruynzeel Mijn Keuken — Backend Proxy
-Bridges the DKG MCP server and the Flutter app.
+Bridges the DKG MCP catalog server and the Flutter app.
 
-Flutter calls: POST /generate  → returns kitchen config + Gemini image (base64)
-Flutter calls: GET  /health    → liveness check
+Flutter sends: POST /generate  → returns concept name + catalog config + Gemini kitchen image
+Flutter sends: GET  /health    → liveness check
+
+MCP findings (confirmed via test_deep.py / test_kitchen_build.py):
+  - NO images in catalog responses — only structured data (dims, features, option_keys)
+  - lookup_option works: "knop" → K012/K026/K028, "marmer" → MW05, "eiken" → EB/AE2/etc.
+  - search_articles: returns dimensions_mm with h/b/t (nominal, from, to, step, variable)
+  - validate_kitchen: returns kitchen_valid bool + per-article violations list
+  - Strategy: use MCP metadata to build a rich, dimension-accurate Gemini image prompt
 """
 
 import asyncio
@@ -18,10 +25,14 @@ from contextlib import asynccontextmanager
 from queue import Queue, Empty
 from typing import Optional
 
+import base64
+
 import httpx
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+from reference_images import pick_reference_image
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -29,7 +40,7 @@ MCP_HOST    = os.getenv("MCP_HOST", "dkg-dev-dockerswarm-app-ingress.azurewebsit
 MCP_BASE    = f"https://{MCP_HOST}/idm-mcp"
 MCP_API_KEY = os.getenv("MCP_API_KEY", "D0AF34E63F344B569DA861AF8D326E3F")
 GEMINI_KEY  = os.getenv("GEMINI_API_KEY", "AIzaSyCiy4UN2JL9D_UN8mIE-8MwpPYvjH40RKc")
-APP_API_KEY = os.getenv("APP_API_KEY", "mijn-keuken-secret")   # Flutter sends this
+APP_API_KEY = os.getenv("APP_API_KEY", "mijn-keuken-secret")
 
 GEMINI_TEXT_URL  = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 GEMINI_IMAGE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image:generateContent"
@@ -37,7 +48,7 @@ GEMINI_IMAGE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemi
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("mijn-keuken-api")
 
-# ── MCP Session (one shared session, re-created on failure) ───────────────────
+# ── MCP Session ───────────────────────────────────────────────────────────────
 
 class McpSession:
     def __init__(self):
@@ -115,20 +126,15 @@ class McpSession:
             self._ep = raw_path if raw_path.startswith("/idm-mcp") else "/idm-mcp" + raw_path
             log.info(f"MCP session: {self._ep}")
 
-            # Start reader thread
             self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
             self._reader_thread.start()
 
-            # MCP handshake
             self._rpc("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
                 "clientInfo": {"name": "mijn-keuken-backend", "version": "1.0"},
             })
-            self._post_raw({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-            })
+            self._post_raw({"jsonrpc": "2.0", "method": "notifications/initialized"})
             log.info("MCP initialized ✅")
             return True
 
@@ -176,7 +182,7 @@ class McpSession:
             pass
         s.close()
 
-    def _rpc(self, method: str, params: dict = None, timeout: int = 15) -> dict:
+    def _rpc(self, method: str, params: dict = None, timeout: int = 30) -> dict:
         with self._lock:
             self._mid += 1
             mid = self._mid
@@ -186,20 +192,31 @@ class McpSession:
             msg["params"] = params
         self._post_raw(msg)
 
-        deadline = asyncio.get_event_loop().time() + timeout if False else None
         import time
         end = time.time() + timeout
         while time.time() < end:
             try:
                 ev = self._q.get(timeout=0.5)
-                d = json.loads(ev["data"])
-                if d.get("id") == mid:
-                    return d.get("result") or d.get("error") or {}
+                try:
+                    d = json.loads(ev["data"])
+                    if d.get("id") == mid:
+                        return d.get("result") or d.get("error") or {}
+                except json.JSONDecodeError:
+                    # Try partial recovery for large truncated responses
+                    raw = ev["data"]
+                    last = raw.rfind("}")
+                    if last > 0:
+                        try:
+                            d = json.loads(raw[:last + 1])
+                            if d.get("id") == mid:
+                                return d.get("result") or {}
+                        except Exception:
+                            pass
             except Empty:
                 pass
         return {}
 
-    def call_tool(self, name: str, args: dict, timeout: int = 20) -> list[dict]:
+    def call_tool(self, name: str, args: dict, timeout: int = 30) -> list[dict]:
         raw = self._rpc("tools/call", {"name": name, "arguments": args}, timeout=timeout)
         content = raw.get("content", [])
         results = []
@@ -207,8 +224,6 @@ class McpSession:
             if c.get("type") != "text":
                 continue
             text = c["text"]
-            # MCP responses can be large and arrive chunked; try parsing,
-            # and if the JSON is truncated fall back to extracting partial array items.
             try:
                 parsed = json.loads(text)
                 if isinstance(parsed, list):
@@ -216,20 +231,16 @@ class McpSession:
                 else:
                     results.append(parsed)
             except json.JSONDecodeError:
-                # Try to recover a partial JSON array
-                try:
-                    # Find last complete object in the array
-                    last_close = text.rfind("}")
-                    if last_close > 0:
+                # Recover partial JSON array from truncated chunked response
+                last_close = text.rfind("}")
+                if last_close > 0:
+                    try:
                         partial = text[:last_close + 1]
                         if not partial.strip().startswith("["):
                             partial = "[" + partial + "]"
-                        partial += "]"
-                        # Remove double-closing bracket if present
-                        partial = partial.replace("]]", "]")
                         results.extend(json.loads(partial))
-                except Exception:
-                    log.warning(f"Could not parse tool response for {name}")
+                    except Exception:
+                        log.warning(f"Could not parse response for {name}")
         return results
 
     def ensure_connected(self):
@@ -240,10 +251,12 @@ class McpSession:
 
 mcp = McpSession()
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     mcp.connect()
     yield
+
 
 app = FastAPI(title="Mijn Keuken API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -252,15 +265,26 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 class GenerateRequest(BaseModel):
     prompt: str
-    onboarding: list[dict] = []   # [{question, answer}]
+    onboarding: list[dict] = []
+
+
+class ArticleResult(BaseModel):
+    type_no: str
+    name: str
+    dimensions_mm: dict = {}
+    chosen_options: dict = {}
+
 
 class GenerateResponse(BaseModel):
     project_id: str
     concept_name: str
     description: str
-    articles: list[dict]
+    style_tags: list[str] = []
+    articles: list[ArticleResult] = []
     image_base64: Optional[str] = None
     catalog_valid: bool = False
+    gemini_prompt: str = ""
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -278,28 +302,117 @@ async def gemini_text(prompt: str) -> dict:
         return json.loads(text)
 
 
-async def gemini_image(prompt: str) -> Optional[str]:
+async def fetch_reference_image(url: str) -> Optional[str]:
+    """Download a Bruynzeel reference kitchen photo and return base64 JPEG."""
+    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}) as client:
+        r = await client.get(url)
+        if r.status_code == 200:
+            return base64.b64encode(r.content).decode()
+    return None
+
+
+async def gemini_image(prompt: str, reference_b64: Optional[str] = None) -> Optional[str]:
+    """
+    Generate a kitchen image using Gemini.
+    If reference_b64 is provided, it is passed as a style reference so the
+    output actually looks like a Bruynzeel kitchen, not a generic AI kitchen.
+    """
+    parts = []
+    if reference_b64:
+        parts.append({
+            "inlineData": {
+                "mimeType": "image/jpeg",
+                "data": reference_b64,
+            }
+        })
+        parts.append({"text": (
+            "This is a real Bruynzeel Keukens kitchen photograph. "
+            "Use it as a style and layout reference. "
+            "Generate a new photorealistic kitchen image in the same Bruynzeel style "
+            "but with the following specific changes:\n\n" + prompt
+        )})
+    else:
+        parts.append({"text": prompt})
+
     async with httpx.AsyncClient(timeout=90) as client:
         r = await client.post(
             f"{GEMINI_IMAGE_URL}?key={GEMINI_KEY}",
             json={
-                "contents": [{"parts": [{"text": prompt}]}],
+                "contents": [{"parts": parts}],
                 "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
             },
         )
         if r.status_code != 200:
+            log.warning(f"Gemini image failed: {r.status_code} {r.text[:200]}")
             return None
-        parts = r.json()["candidates"][0]["content"]["parts"]
-        for p in parts:
+        resp_parts = r.json()["candidates"][0]["content"]["parts"]
+        for p in resp_parts:
             if "inlineData" in p:
                 return p["inlineData"]["data"]
     return None
 
 
-def run_in_thread(fn, *args):
-    """Run a blocking call (MCP) in a thread pool so it doesn't block the event loop."""
+def run_blocking(fn, *args):
     loop = asyncio.get_event_loop()
     return loop.run_in_executor(None, fn, *args)
+
+
+def _mcp_call(name, args):
+    return mcp.call_tool(name, args)
+
+
+def _build_image_prompt(concept: dict, catalog_items: list[dict]) -> str:
+    """
+    Build a detailed Gemini image prompt from catalog metadata.
+    MCP returns no images — we use dimensions + model names + option names
+    to drive photorealistic generation.
+    """
+    style       = concept.get("style", "modern warm")
+    color_desc  = concept.get("color_description", "warm natural wood tones")
+    worktop     = concept.get("worktop_description", "white marble")
+    handle      = concept.get("handle_description", "knob handles")
+    has_island  = concept.get("has_island", False)
+    extra_desc  = concept.get("extra_description", "")
+
+    dim_parts = []
+    model_parts = []
+    for item in catalog_items[:3]:
+        dims = item.get("dimensions_mm", {})
+        if dims:
+            b = dims.get("b", {})
+            h = dims.get("h", {})
+            t = dims.get("t", {})
+            w = b.get("nominal", b.get("from", "")) if isinstance(b, dict) else b
+            ht = h.get("nominal", h.get("from", "")) if isinstance(h, dict) else h
+            d = t.get("nominal", t.get("from", "")) if isinstance(t, dict) else t
+            if w: dim_parts.append(f"{w}mm wide cabinet")
+        model_name = item.get("model_name", "")
+        if model_name:
+            model_parts.append(model_name)
+
+    dim_text   = ", ".join(dim_parts) if dim_parts else "standard 600mm cabinets"
+    model_text = f"Cabinet model: {', '.join(set(model_parts))}." if model_parts else ""
+
+    return f"""Photorealistic interior design photograph of a Bruynzeel kitchen.
+Professional architecture photography, magazine quality, natural daylight through large windows, no people, no text.
+Landscape orientation, wide establishing shot showing full kitchen.
+
+Kitchen design brief:
+- Style: {style}
+- Cabinet finish: {color_desc}
+- Worktop: {worktop}, thick 30mm edge profile
+- Handles: {handle}
+- {model_text}
+- Cabinet dimensions: {dim_text}
+{"- Kitchen island with seating" if has_island else "- Straight run or L-shape kitchen layout"}
+{f"- {extra_desc}" if extra_desc else ""}
+- Floor: light herringbone oak parquet
+- Wall tiles: off-white metro tiles behind hob area
+- Lighting: warm pendant lights, under-cabinet LED strips
+- Atmosphere: inviting, magazine-quality Dutch interior design
+
+Bruynzeel Keukens signature style: clean lines, quality materials, timeless Dutch craftsmanship."""
+
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -315,72 +428,152 @@ async def generate(req: GenerateRequest, x_api_key: str = Header(default="")):
 
     mcp.ensure_connected()
 
-    # 1. Use Gemini to extract catalog search intent from the prompt
-    intent_prompt = f"""
-Je bent een Bruynzeel keuken configurator assistent.
-Analyseer deze keuken beschrijving en geef een JSON object terug:
+    # ── 1. Gemini: extract structured intent from the prompt ──────────────────
+    intent_prompt = f"""Je bent een Bruynzeel keuken configurator.
+Analyseer de keuken beschrijving en geef ALLEEN een JSON object terug (geen markdown):
 {{
-  "style_terms": ["term1", "term2"],   // Dutch style/material keywords to look up
-  "width_mm": 600,                      // typical cabinet width based on description
-  "has_island": false,                  // kookeiland?
-  "concept_name": "Naam voor dit concept",
-  "image_prompt": "English photorealistic kitchen description for image generation"
+  "concept_name": "Korte Nederlandse naam voor dit concept",
+  "style": "one of: modern, klassiek, landelijk, industrieel, scandinavisch",
+  "color_description": "beschrijving van kastkleur/fineer in het Engels",
+  "worktop_description": "beschrijving van het aanrechtblad in het Engels",
+  "handle_description": "beschrijving van de grepen in het Engels",
+  "has_island": false,
+  "search_terms": ["NL zoekterm1", "NL zoekterm2"],
+  "lookup_terms": ["NL term voor greep/kleur/materiaal lookup"],
+  "style_tags": ["tag1", "tag2", "tag3"],
+  "extra_description": "extra details voor beeldgeneratie in het Engels"
 }}
 
-Keuken beschrijving: "{req.prompt}"
-Onboarding antwoorden: {json.dumps(req.onboarding, ensure_ascii=False)}
-"""
+Beschrijving: "{req.prompt}"
+Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
+
     try:
         intent = await gemini_text(intent_prompt)
     except Exception as e:
         log.warning(f"Gemini intent failed: {e}")
-        intent = {"style_terms": ["modern"], "width_mm": 600, "has_island": False,
-                  "concept_name": "Mijn Droomkeuken", "image_prompt": req.prompt}
+        intent = {
+            "concept_name": "Mijn Droomkeuken",
+            "style": "modern",
+            "color_description": "warm natural wood",
+            "worktop_description": "white marble",
+            "handle_description": "knob handles",
+            "has_island": False,
+            "search_terms": ["keuken"],
+            "lookup_terms": ["knop"],
+            "style_tags": [],
+            "extra_description": req.prompt,
+        }
 
-    # 2. MCP: look up option keys for style terms
-    option_keys = []
-    for term in intent.get("style_terms", [])[:3]:
+    log.info(f"Intent: {intent.get('concept_name')} / {intent.get('style')}")
+
+    # ── 2. MCP: lookup option keys for material/style terms ───────────────────
+    option_map: dict[str, list] = {}
+    for term in intent.get("lookup_terms", [])[:4]:
         try:
-            opts = await run_in_thread(mcp.call_tool, "lookup_option", {"query": term, "language": "NL"})
-            option_keys.extend(opts)
+            opts = await run_blocking(_mcp_call, "lookup_option", {"query": term, "language": "NL"})
+            if opts:
+                option_map[term] = opts
         except Exception as e:
-            log.warning(f"lookup_option({term}) failed: {e}")
+            log.warning(f"lookup_option({term}): {e}")
 
-    # 3. MCP: search articles
-    articles = []
+    # ── 3. MCP: search for relevant articles ─────────────────────────────────
+    raw_articles: list[dict] = []
     try:
-        articles = await run_in_thread(
-            mcp.call_tool, "search_articles",
-            {"width_mm": intent.get("width_mm", 600), "limit": 8},
-        )
+        raw_articles = await run_blocking(_mcp_call, "search_articles", {"width_mm": 600, "limit": 6})
     except Exception as e:
-        log.warning(f"search_articles failed: {e}")
+        log.warning(f"search_articles: {e}")
 
-    # 4. MCP: validate kitchen if we have articles
+    # ── 4. Build chosen options per article from lookup results ───────────────
+    catalog_items: list[dict] = []
+    kitchen_config: list[dict] = []
+
+    for art in raw_articles[:4]:
+        type_no = art.get("type_no", "")
+        if not type_no:
+            continue
+
+        chosen_options: dict[str, str] = {}
+
+        # Map lookup results to feature_no → option_key
+        for term, opts in option_map.items():
+            for opt in opts[:1]:
+                fn = str(opt.get("feature_no", ""))
+                ok = opt.get("option_key", "")
+                if fn and ok and fn not in chosen_options:
+                    chosen_options[fn] = ok
+
+        catalog_items.append({
+            "type_no": type_no,
+            "name": art.get("name", ""),
+            "dimensions_mm": art.get("dimensions_mm", {}),
+            "chosen_options": chosen_options,
+            "model_name": next(
+                (o["name"] for opts in option_map.values() for o in opts if o.get("feature_no") == 1),
+                ""
+            ),
+        })
+        kitchen_config.append({"type_no": type_no, "options": chosen_options})
+
+    # ── 5. MCP: validate the kitchen config ───────────────────────────────────
     catalog_valid = False
-    if articles:
+    if kitchen_config:
         try:
-            kitchen_cfg = [{"type_no": a["type_no"], "serie_no": a.get("serie_no", "0"), "options": {}} for a in articles[:4]]
-            val_result = await run_in_thread(
-                mcp.call_tool, "validate_kitchen",
-                {"kitchen_json": json.dumps(kitchen_cfg)},
+            val_result = await run_blocking(
+                _mcp_call, "validate_kitchen", {"kitchen_json": json.dumps(kitchen_config)}
             )
             catalog_valid = val_result[0].get("kitchen_valid", False) if val_result else False
+            violations = [
+                f"{r['type_no']}: {'; '.join(r['violations'])}"
+                for r in (val_result[0].get("results", []) if val_result else [])
+                if r.get("violations")
+            ]
+            if violations:
+                log.warning(f"Violations: {violations}")
         except Exception as e:
-            log.warning(f"validate_kitchen failed: {e}")
+            log.warning(f"validate_kitchen: {e}")
 
-    # 5. Gemini image generation
-    image_b64 = await gemini_image(
-        f"Photorealistic Bruynzeel kitchen interior. {intent.get('image_prompt', req.prompt)}. "
-        f"{'Kitchen island present. ' if intent.get('has_island') else ''}"
-        f"Professional interior photography, natural light, no people."
+    # ── 6. Pick reference image based on chosen MCP options ──────────────────
+    # Derive model_key and color_key from the lookup results
+    model_key = next(
+        (o["option_key"] for opts in option_map.values() for o in opts if o.get("feature_no") == 1),
+        ""
     )
+    color_key = next(
+        (o["option_key"] for opts in option_map.values() for o in opts if o.get("feature_no") in (100, 101)),
+        ""
+    )
+    ref_url = pick_reference_image(
+        model_key=model_key,
+        color_key=color_key,
+        style_tags=intent.get("style_tags", []) + [intent.get("style", "")],
+    )
+    log.info(f"Reference image: {ref_url.split('/')[-1]}")
+    reference_b64 = await fetch_reference_image(ref_url)
+    if not reference_b64:
+        log.warning("Could not fetch reference image, generating without reference")
+
+    # ── 7. Build Gemini image prompt from catalog metadata ────────────────────
+    img_prompt = _build_image_prompt(intent, catalog_items)
+    log.info(f"Generating image (prompt {len(img_prompt)} chars, ref={'yes' if reference_b64 else 'no'})...")
+
+    # ── 8. Generate kitchen image with reference ───────────────────────────────
+    image_b64 = await gemini_image(img_prompt, reference_b64=reference_b64)
 
     return GenerateResponse(
         project_id=str(uuid.uuid4()),
         concept_name=intent.get("concept_name", "Mijn Droomkeuken"),
         description=req.prompt,
-        articles=articles[:6],
+        style_tags=intent.get("style_tags", []),
+        articles=[
+            ArticleResult(
+                type_no=item["type_no"],
+                name=item["name"],
+                dimensions_mm=item["dimensions_mm"],
+                chosen_options=item["chosen_options"],
+            )
+            for item in catalog_items
+        ],
         image_base64=image_b64,
         catalog_valid=catalog_valid,
+        gemini_prompt=img_prompt,
     )
