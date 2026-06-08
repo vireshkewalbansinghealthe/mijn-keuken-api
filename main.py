@@ -25,14 +25,10 @@ from contextlib import asynccontextmanager
 from queue import Queue, Empty
 from typing import Optional
 
-import base64
-
 import httpx
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
-from reference_images import pick_reference_image
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -302,51 +298,20 @@ async def gemini_text(prompt: str) -> dict:
         return json.loads(text)
 
 
-async def fetch_reference_image(url: str) -> Optional[str]:
-    """Download a Bruynzeel reference kitchen photo and return base64 JPEG."""
-    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"}) as client:
-        r = await client.get(url)
-        if r.status_code == 200:
-            return base64.b64encode(r.content).decode()
-    return None
-
-
-async def gemini_image(prompt: str, reference_b64: Optional[str] = None) -> Optional[str]:
-    """
-    Generate a kitchen image using Gemini.
-    If reference_b64 is provided, it is passed as a style reference so the
-    output actually looks like a Bruynzeel kitchen, not a generic AI kitchen.
-    """
-    parts = []
-    if reference_b64:
-        parts.append({
-            "inlineData": {
-                "mimeType": "image/jpeg",
-                "data": reference_b64,
-            }
-        })
-        parts.append({"text": (
-            "This is a real Bruynzeel Keukens kitchen photograph. "
-            "Use it as a style and layout reference. "
-            "Generate a new photorealistic kitchen image in the same Bruynzeel style "
-            "but with the following specific changes:\n\n" + prompt
-        )})
-    else:
-        parts.append({"text": prompt})
-
+async def gemini_image(prompt: str) -> Optional[str]:
     async with httpx.AsyncClient(timeout=90) as client:
         r = await client.post(
             f"{GEMINI_IMAGE_URL}?key={GEMINI_KEY}",
             json={
-                "contents": [{"parts": parts}],
+                "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
             },
         )
         if r.status_code != 200:
             log.warning(f"Gemini image failed: {r.status_code} {r.text[:200]}")
             return None
-        resp_parts = r.json()["candidates"][0]["content"]["parts"]
-        for p in resp_parts:
+        parts = r.json()["candidates"][0]["content"]["parts"]
+        for p in parts:
             if "inlineData" in p:
                 return p["inlineData"]["data"]
     return None
@@ -519,55 +484,64 @@ def _sacred_sequence(lookup_terms: list[str], target_width: int = 600) -> dict:
 
 def _build_image_prompt(concept: dict, catalog_items: list[dict]) -> str:
     """
-    Build a detailed Gemini image prompt from catalog metadata.
-    MCP returns no images — we use dimensions + model names + option names
-    to drive photorealistic generation.
+    Build a Gemini image prompt from catalog metadata + design intent.
+    The MCP catalog contains handelsartikelen (trade articles: appliances, taps,
+    sinks). Cabinet reference images will be added once available from DKG.
     """
-    style       = concept.get("style", "modern warm")
-    color_desc  = concept.get("color_description", "warm natural wood tones")
-    worktop     = concept.get("worktop_description", "white marble")
-    handle      = concept.get("handle_description", "knob handles")
-    has_island  = concept.get("has_island", False)
-    extra_desc  = concept.get("extra_description", "")
+    style      = concept.get("style", "modern warm")
+    color_desc = concept.get("color_description", "warm natural wood tones")
+    worktop    = concept.get("worktop_description", "white marble")
+    handle     = concept.get("handle_description", "knob handles")
+    has_island = concept.get("has_island", False)
+    extra_desc = concept.get("extra_description", "")
 
+    # Extract appliance info from trade articles (what the MCP actually has)
+    appliance_parts = []
     dim_parts = []
-    model_parts = []
-    for item in catalog_items[:3]:
+    for item in catalog_items[:4]:
+        name = item.get("name", "")
         dims = item.get("dimensions_mm", {})
+        if name:
+            # Classify article type for the image prompt
+            nl = name.lower()
+            if any(w in nl for w in ["oven", "magnetron", "combi"]):
+                appliance_parts.append("built-in oven")
+            elif any(w in nl for w in ["kraan", "mengkraan", "tap"]):
+                appliance_parts.append("designer tap")
+            elif any(w in nl for w in ["vaat", "dishwasher"]):
+                appliance_parts.append("integrated dishwasher")
+            elif any(w in nl for w in ["koel", "fridge", "vriezer"]):
+                appliance_parts.append("integrated fridge")
+            elif any(w in nl for w in ["stopcontact", "inbouw"]):
+                appliance_parts.append("integrated power sockets")
         if dims:
             b = dims.get("b", {})
-            h = dims.get("h", {})
-            t = dims.get("t", {})
             w = b.get("nominal", b.get("from", "")) if isinstance(b, dict) else b
-            ht = h.get("nominal", h.get("from", "")) if isinstance(h, dict) else h
-            d = t.get("nominal", t.get("from", "")) if isinstance(t, dict) else t
-            if w: dim_parts.append(f"{w}mm wide cabinet")
-        model_name = item.get("model_name", "")
-        if model_name:
-            model_parts.append(model_name)
+            if w:
+                dim_parts.append(f"{int(w)}mm")
 
-    dim_text   = ", ".join(dim_parts) if dim_parts else "standard 600mm cabinets"
-    model_text = f"Cabinet model: {', '.join(set(model_parts))}." if model_parts else ""
+    appliance_text = ", ".join(dict.fromkeys(appliance_parts)) if appliance_parts else ""
+    dim_text = f"Cabinet widths: {', '.join(dim_parts)}." if dim_parts else ""
 
     return f"""Photorealistic interior design photograph of a Bruynzeel kitchen.
 Professional architecture photography, magazine quality, natural daylight through large windows, no people, no text.
-Landscape orientation, wide establishing shot showing full kitchen.
+Landscape orientation, wide establishing shot showing the full kitchen.
 
-Kitchen design brief:
+Kitchen specifications:
 - Style: {style}
 - Cabinet finish: {color_desc}
 - Worktop: {worktop}, thick 30mm edge profile
 - Handles: {handle}
-- {model_text}
-- Cabinet dimensions: {dim_text}
-{"- Kitchen island with seating" if has_island else "- Straight run or L-shape kitchen layout"}
+{f"- Appliances visible: {appliance_text}" if appliance_text else ""}
+{f"- {dim_text}" if dim_text else ""}
+{"- Kitchen island with seating stools" if has_island else "- L-shape or straight run layout"}
 {f"- {extra_desc}" if extra_desc else ""}
 - Floor: light herringbone oak parquet
-- Wall tiles: off-white metro tiles behind hob area
-- Lighting: warm pendant lights, under-cabinet LED strips
-- Atmosphere: inviting, magazine-quality Dutch interior design
+- Wall: off-white metro tiles behind hob
+- Lighting: warm pendant lights over island, under-cabinet LED strips
+- Atmosphere: inviting, Dutch magazine-quality interior
 
-Bruynzeel Keukens signature style: clean lines, quality materials, timeless Dutch craftsmanship."""
+Bruynzeel Keukens style: clean lines, quality materials, timeless Dutch craftsmanship."""
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -646,25 +620,15 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
             "model_name":   "",
         })
 
-    # ── 6. Pick reference image from MCP-resolved model + color ──────────────
-    model_key = seq["model_key"]
-    color_key = seq["color_key"]
-    ref_url = pick_reference_image(
-        model_key=model_key,
-        color_key=color_key,
-        style_tags=intent.get("style_tags", []) + [intent.get("style", "")],
-    )
-    log.info(f"Reference image: {ref_url.split('/')[-1]}")
-    reference_b64 = await fetch_reference_image(ref_url)
-    if not reference_b64:
-        log.warning("Could not fetch reference image, generating without reference")
-
-    # ── 7. Build Gemini image prompt from catalog metadata ────────────────────
+    # ── 6. Build Gemini image prompt ──────────────────────────────────────────
+    # Note: MCP catalog contains only trade articles (handelsartikelen: appliances,
+    # taps, sinks). Cabinet images are not yet available in the catalog.
+    # Reference image support will be added once the DKG developer ships that endpoint.
     img_prompt = _build_image_prompt(intent, catalog_items)
-    log.info(f"Generating image (prompt {len(img_prompt)} chars, ref={'yes' if reference_b64 else 'no'})...")
+    log.info(f"Generating image (prompt {len(img_prompt)} chars)...")
 
-    # ── 8. Generate kitchen image with reference ───────────────────────────────
-    image_b64 = await gemini_image(img_prompt, reference_b64=reference_b64)
+    # ── 7. Generate kitchen image ─────────────────────────────────────────────
+    image_b64 = await gemini_image(img_prompt)
 
     return GenerateResponse(
         project_id=str(uuid.uuid4()),
