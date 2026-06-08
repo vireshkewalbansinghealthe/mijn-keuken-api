@@ -361,6 +361,162 @@ def _mcp_call(name, args):
     return mcp.call_tool(name, args)
 
 
+# ── Sacred sequence implementation ───────────────────────────────────────────
+
+def _sacred_sequence(lookup_terms: list[str], target_width: int = 600) -> dict:
+    """
+    Implements the full documented MCP call sequence:
+
+    1. lookup_option(term)          → option_key per feature
+    2. search_articles(width_mm)    → candidate type_nos
+    3. get_article_detail(type_no)  → all configurable features
+    4. get_valid_options(type_no, feature_no, selection_json)  → forward-check each step
+    5. validate_kitchen([...])      → confirm config is legal
+
+    Returns a dict with:
+      - articles: list of found article dicts (with type_no, name, dims)
+      - selection: {type_no: {feature_no: option_key}} — valid final config
+      - model_key: chosen model option_key (feature 1)
+      - color_key: chosen color option_key (feature 100/101)
+      - kitchen_valid: bool
+      - violations: list of strings
+    """
+    result = {
+        "articles": [],
+        "selection": {},
+        "model_key": "",
+        "color_key": "",
+        "kitchen_valid": False,
+        "violations": [],
+    }
+
+    # Step 1 — lookup_option for each requested term
+    option_by_feature: dict[int, list[dict]] = {}
+    for term in lookup_terms[:5]:
+        opts = mcp.call_tool("lookup_option", {"query": term, "language": "NL"})
+        for opt in opts:
+            fn = opt.get("feature_no")
+            if fn is not None:
+                option_by_feature.setdefault(fn, [])
+                # Keep first unique option_key per feature
+                keys = [o["option_key"] for o in option_by_feature[fn]]
+                if opt["option_key"] not in keys:
+                    option_by_feature[fn].append(opt)
+
+    log.info(f"lookup_option found features: {list(option_by_feature.keys())}")
+
+    # Step 2 — search_articles: try with serie_no explicit, then fallback
+    raw_articles: list[dict] = []
+    for serie in ["1", "2", None]:
+        args: dict = {"width_mm": target_width, "limit": 8}
+        if serie:
+            args["serie_no"] = serie
+        found = mcp.call_tool("search_articles", args)
+        for a in found:
+            if a.get("type_no") and not a.get("error"):
+                raw_articles.append(a)
+        if raw_articles:
+            break
+
+    if not raw_articles:
+        # Last resort: no width filter
+        raw_articles = mcp.call_tool("search_articles", {"limit": 8})
+
+    log.info(f"search_articles found {len(raw_articles)} articles")
+    result["articles"] = raw_articles
+
+    # Step 3 + 4 — for each article: get_article_detail then get_valid_options
+    for art in raw_articles[:3]:
+        type_no  = art.get("type_no", "")
+        serie_no = art.get("serie_no", "0")
+        if not type_no:
+            continue
+
+        detail_args: dict = {"type_no": type_no}
+        if serie_no and serie_no != "0":
+            detail_args["serie_no"] = serie_no
+
+        detail = mcp.call_tool("get_article_detail", detail_args)
+        if not detail or not isinstance(detail[0], dict) or not detail[0].get("features"):
+            continue
+
+        d = detail[0]
+        features = {f["feature_no"]: f for f in d.get("features", [])}
+        log.info(f"  {type_no} features: {list(features.keys())}")
+
+        chosen: dict[str, str] = {}   # {str(feature_no): option_key}
+
+        # For each feature that has a desired option from lookup:
+        for fn_int, desired_opts in sorted(option_by_feature.items()):
+            if fn_int not in features:
+                continue
+            fn_str = str(fn_int)
+
+            # Step 4: get_valid_options with current selection as selection_json
+            valid_args: dict = {
+                "type_no": type_no,
+                "feature_no": fn_int,
+                "selection_json": json.dumps({int(k): v for k, v in chosen.items()}) if chosen else "{}",
+            }
+            if serie_no and serie_no != "0":
+                valid_args["serie_no"] = serie_no
+
+            valid_result = mcp.call_tool("get_valid_options", valid_args)
+            valid_keys = set()
+            if valid_result and isinstance(valid_result[0], dict):
+                valid_keys = {o["option_key"] for o in valid_result[0].get("valid_options", [])}
+
+            # Pick the first desired option that is currently valid
+            picked = None
+            for opt in desired_opts:
+                key = opt["option_key"]
+                if not valid_keys or key in valid_keys:
+                    picked = key
+                    break
+
+            # Fallback: first valid option for this feature
+            if not picked and valid_result and valid_result[0].get("valid_options"):
+                picked = valid_result[0]["valid_options"][0]["option_key"]
+
+            if picked:
+                chosen[fn_str] = picked
+                log.info(f"    feature {fn_int} → {picked}")
+
+        if not chosen:
+            # Fill model (feature 1) at minimum
+            if 1 in features and features[1].get("options"):
+                chosen["1"] = features[1]["options"][0]["option_key"]
+
+        if chosen:
+            result["selection"][type_no] = chosen
+            # Extract model/color keys for reference image selection
+            if not result["model_key"] and "1" in chosen:
+                result["model_key"] = chosen["1"]
+            if not result["color_key"] and ("100" in chosen or "101" in chosen):
+                result["color_key"] = chosen.get("100") or chosen.get("101", "")
+            break   # one article with valid config is enough
+
+    # Step 5 — validate_kitchen
+    if result["selection"]:
+        kitchen_cfg = [
+            {"type_no": tn, "options": {int(k): v for k, v in opts.items()}}
+            for tn, opts in result["selection"].items()
+        ]
+        try:
+            val = mcp.call_tool("validate_kitchen", {"kitchen_json": json.dumps(kitchen_cfg)})
+            if val and isinstance(val[0], dict):
+                result["kitchen_valid"] = val[0].get("kitchen_valid", False)
+                result["violations"] = [
+                    f"{r['type_no']}: {'; '.join(r['violations'])}"
+                    for r in val[0].get("results", [])
+                    if r.get("violations")
+                ]
+        except Exception as e:
+            log.warning(f"validate_kitchen: {e}")
+
+    return result
+
+
 def _build_image_prompt(concept: dict, catalog_items: list[dict]) -> str:
     """
     Build a detailed Gemini image prompt from catalog metadata.
@@ -438,8 +594,8 @@ Analyseer de keuken beschrijving en geef ALLEEN een JSON object terug (geen mark
   "worktop_description": "beschrijving van het aanrechtblad in het Engels",
   "handle_description": "beschrijving van de grepen in het Engels",
   "has_island": false,
-  "search_terms": ["NL zoekterm1", "NL zoekterm2"],
-  "lookup_terms": ["NL term voor greep/kleur/materiaal lookup"],
+  "lookup_terms": ["NL termen voor lookup_option, bijv: eiken, knop, marmer, wit, mat zwart"],
+  "target_width_mm": 600,
   "style_tags": ["tag1", "tag2", "tag3"],
   "extra_description": "extra details voor beeldgeneratie in het Engels"
 }}
@@ -458,90 +614,41 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
             "worktop_description": "white marble",
             "handle_description": "knob handles",
             "has_island": False,
-            "search_terms": ["keuken"],
-            "lookup_terms": ["knop"],
+            "lookup_terms": ["knop", "eiken"],
+            "target_width_mm": 600,
             "style_tags": [],
             "extra_description": req.prompt,
         }
 
     log.info(f"Intent: {intent.get('concept_name')} / {intent.get('style')}")
 
-    # ── 2. MCP: lookup option keys for material/style terms ───────────────────
-    option_map: dict[str, list] = {}
-    for term in intent.get("lookup_terms", [])[:4]:
-        try:
-            opts = await run_blocking(_mcp_call, "lookup_option", {"query": term, "language": "NL"})
-            if opts:
-                option_map[term] = opts
-        except Exception as e:
-            log.warning(f"lookup_option({term}): {e}")
+    # ── 2-5. Sacred sequence: lookup → search → detail → valid_options → validate
+    seq = await run_blocking(
+        _sacred_sequence,
+        intent.get("lookup_terms", ["knop"]),
+        intent.get("target_width_mm", 600),
+    )
 
-    # ── 3. MCP: search for relevant articles ─────────────────────────────────
-    raw_articles: list[dict] = []
-    try:
-        raw_articles = await run_blocking(_mcp_call, "search_articles", {"width_mm": 600, "limit": 6})
-    except Exception as e:
-        log.warning(f"search_articles: {e}")
+    catalog_valid = seq["kitchen_valid"]
+    if seq["violations"]:
+        log.warning(f"Violations: {seq['violations']}")
 
-    # ── 4. Build chosen options per article from lookup results ───────────────
+    # Build catalog_items for image prompt
     catalog_items: list[dict] = []
-    kitchen_config: list[dict] = []
-
-    for art in raw_articles[:4]:
+    for art in seq["articles"][:4]:
         type_no = art.get("type_no", "")
-        if not type_no:
-            continue
-
-        chosen_options: dict[str, str] = {}
-
-        # Map lookup results to feature_no → option_key
-        for term, opts in option_map.items():
-            for opt in opts[:1]:
-                fn = str(opt.get("feature_no", ""))
-                ok = opt.get("option_key", "")
-                if fn and ok and fn not in chosen_options:
-                    chosen_options[fn] = ok
-
+        chosen  = seq["selection"].get(type_no, {})
         catalog_items.append({
-            "type_no": type_no,
-            "name": art.get("name", ""),
+            "type_no":      type_no,
+            "name":         art.get("name", ""),
             "dimensions_mm": art.get("dimensions_mm", {}),
-            "chosen_options": chosen_options,
-            "model_name": next(
-                (o["name"] for opts in option_map.values() for o in opts if o.get("feature_no") == 1),
-                ""
-            ),
+            "chosen_options": chosen,
+            "model_name":   "",
         })
-        kitchen_config.append({"type_no": type_no, "options": chosen_options})
 
-    # ── 5. MCP: validate the kitchen config ───────────────────────────────────
-    catalog_valid = False
-    if kitchen_config:
-        try:
-            val_result = await run_blocking(
-                _mcp_call, "validate_kitchen", {"kitchen_json": json.dumps(kitchen_config)}
-            )
-            catalog_valid = val_result[0].get("kitchen_valid", False) if val_result else False
-            violations = [
-                f"{r['type_no']}: {'; '.join(r['violations'])}"
-                for r in (val_result[0].get("results", []) if val_result else [])
-                if r.get("violations")
-            ]
-            if violations:
-                log.warning(f"Violations: {violations}")
-        except Exception as e:
-            log.warning(f"validate_kitchen: {e}")
-
-    # ── 6. Pick reference image based on chosen MCP options ──────────────────
-    # Derive model_key and color_key from the lookup results
-    model_key = next(
-        (o["option_key"] for opts in option_map.values() for o in opts if o.get("feature_no") == 1),
-        ""
-    )
-    color_key = next(
-        (o["option_key"] for opts in option_map.values() for o in opts if o.get("feature_no") in (100, 101)),
-        ""
-    )
+    # ── 6. Pick reference image from MCP-resolved model + color ──────────────
+    model_key = seq["model_key"]
+    color_key = seq["color_key"]
     ref_url = pick_reference_image(
         model_key=model_key,
         color_key=color_key,
@@ -574,6 +681,6 @@ Onboarding: {json.dumps(req.onboarding, ensure_ascii=False)}"""
             for item in catalog_items
         ],
         image_base64=image_b64,
-        catalog_valid=catalog_valid,
+        catalog_valid=seq["kitchen_valid"],
         gemini_prompt=img_prompt,
     )
